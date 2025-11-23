@@ -98,3 +98,4 @@ If you see the preview of the show in the **Model Preview** pane, everything is 
 2. All the project consisted of was a video track with the video, an audio track with the video's original audio, and an audio track for the MP3.
 3. After lining up the MP3 audio track with the video using the clap cue, I removed the video's original audio track.
 4. To export the video, in the top toolbar, go to **Project > Render**.
+5. The only thing I changed from the defaults was the aspect ratio by selecting **More options** and then changing **Aspect Ratio** to **Vertical (9:16)**.
