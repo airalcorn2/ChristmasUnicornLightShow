@@ -1,6 +1,6 @@
 # Christmas Unicorn Light Show
 
-This repository contains the pieces for my (small) xLights show set to "Christmas Unicorn" by Sufjan Stevens.
+This repository contains the rough instructions for my (small) xLights show set to "Christmas Unicorn" by Sufjan Stevens.
 This was my first time making a light show, so this repository is also meant to serve as a reminder of what I did.
 
 ## Purchasing a Controller
