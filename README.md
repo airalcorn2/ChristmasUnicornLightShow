@@ -17,7 +17,7 @@ The main thing you're looking for is individually addressable RGB LEDs using the
 
 ## Purchasing a Corrugated Plastic Sheet
 
-I bought the Coroplast 36 in. x 72 in. x 0.157 in. (4mm) White Corrugated Twinwall Plastic Sheet seen [here](https://www.homedepot.com/p/Coroplast-36-in-x-72-in-x-0-157-in-4mm-White-Corrugated-Twinwall-Plastic-Sheet-COR-3672/202771364) from The Home Depot.
+I bought the Coroplast 36 in. x 72 in. x 0.157 in. (4mm) White Corrugated Twinwall Plastic Sheet seen [here](https://www.homedepot.com/p/Coroplast-36-in-x-72-in-x-0-157-in-4mm-White-Corrugated-Twinwall-Plastic-Sheet-COR-3672/202771364) from The Home Depot and cut it in half.
 I used a power drill to drill holes into the sheet for the lights (I don't remember the size of the drill bit, unfortunately).
 
 ## Installing xLights
