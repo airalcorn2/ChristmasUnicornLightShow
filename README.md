@@ -43,17 +43,19 @@ This is probably the most complicated step not involving xLights.
     ifconfig
     ```
     Look for an interface such as `eth0` (for direct Ethernet connection) or `enp0s20f0u1c2` (if using a USB adapter).
+   
     2. Set the IP address.
     To communicate with the controller, your computer must be on the same subnet (e.g., `192.168.1.xxx` with subnet mask `255.255.255.0`)
     ```bash
     sudo ip addr add 192.168.1.100/24 dev enp0s20f0u1c2
     ```
     The `/24` is CIDR notation (Classless Inter-Domain Routing) and specifies the subnet mask.
-    3. Check that you can access the controller's web UI at its IP address (i.e., http://192.168.1.50 in this example) in your browser.
+    
+	3. Check that you can access the controller's UI page at its IP address (i.e., http://192.168.1.50 in this example) in your browser.
     If so, you're connected!
-4. Plug in your lights (you might need to use multiple ports).
-5. Test the lights.
-    1. At the controller's web UI, click the "Testing" tab.
+5. Plug in your lights (you might need to use multiple ports).
+6. Test the lights.
+    1. At the controller's UI page, click the "Testing" tab.
 
 ## Designing the Model
 
