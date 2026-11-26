@@ -233,14 +233,17 @@ def effect_color(
 
     [sparkle] picks a random bright color per call (so each targeted group
     flickers independently - this is called once per group per frame);
-    [rainbow] cycles hue smoothly, the same for every targeted group at a
-    given instant; [glow] modulates ``base_color``'s own brightness up and
-    down, so it reads as "the unicorn's own colors breathing" rather than a
-    new palette; [flash] is just solid white; [color] is a single fixed
-    color from config.EFFECT_COLOR_PALETTE, named by the effect's own
-    ``color`` field (falling back to ``base_color`` if that's somehow
-    missing/unrecognized, same fail-safe reasoning as the unrecognized-name
-    case below).
+    [glow] modulates ``base_color``'s own brightness up and down, so it
+    reads as "the unicorn's own colors breathing" rather than a new
+    palette; [flash] is just solid white; [color] is a single fixed color
+    from config.EFFECT_COLOR_PALETTE, named by the effect's own ``color``
+    field (falling back to ``base_color`` if that's somehow missing/
+    unrecognized, same fail-safe reasoning as the unrecognized-name case
+    below). [rainbow] has no branch here - unlike the others, it needs each
+    pixel in the targeted group to show a different, traveling color, not
+    one shared value - see _rainbow_colors()/build_talk_frame(), which
+    paint a [rainbow]-targeted group that way instead of calling this
+    function for it at all.
     """
     if effect is None:
         return base_color
@@ -249,9 +252,6 @@ def effect_color(
         return base_color
     if effect_name == "sparkle":
         return random.choice(config.EFFECT_SPARKLE_COLORS)
-    if effect_name == "rainbow":
-        hue = (now / config.EFFECT_RAINBOW_PERIOD) % 1.0
-        return _hue_to_rgb(hue)
     if effect_name == "glow":
         phase = (now % config.EFFECT_GLOW_PERIOD) / config.EFFECT_GLOW_PERIOD
         glow_factor = 0.4 + 0.6 * (0.5 + 0.5 * math.sin(2 * math.pi * phase))
@@ -263,6 +263,28 @@ def effect_color(
         return config.EFFECT_COLOR_PALETTE.get(color, base_color) if color is not None else base_color
     return base_color  # An unrecognized name (shouldn't happen - extract_effect_tags() only
     # ever returns names from config.EFFECT_NAMES) - fail safe to the plain color.
+
+
+def _rainbow_colors(now: float, count: int) -> list[tuple[int, int, int]]:
+    """Return ``count`` colors forming one full rainbow gradient across a
+    sequence of lights, each one offset from the next by 1/count of a full
+    hue cycle. The whole gradient also scrolls along the sequence over
+    time, at config.EFFECT_RAINBOW_PERIOD's rate, by adding the same
+    time-based phase every light already got (pre-per-pixel-gradient) on
+    top of each one's own position offset.
+    """
+    return [
+        _hue_to_rgb(((i / count) + (now / config.EFFECT_RAINBOW_PERIOD)) % 1.0)
+        for i in range(count)
+    ]
+
+
+def _rainbow_targets(effect: tuple[str, str, str | None] | None, group_name: str) -> bool:
+    """Whether ``effect`` is an active [rainbow] targeting ``group_name``
+    (or "all") - see build_talk_frame(), which paints such a group with
+    _rainbow_colors() instead of calling effect_color() for it.
+    """
+    return effect is not None and effect[0] == "rainbow" and effect[1] in ("all", group_name)
 
 
 def build_talk_frame(
@@ -284,29 +306,41 @@ def build_talk_frame(
     can be config.official_band_config() instead - see run_conversation()'s
     ``use_official_colors``. If ``effect`` (a (name, target, color) triple -
     see config.EFFECT_NAMES/config.EFFECT_TARGETS/config.EFFECT_COLOR_PALETTE/
-    voice.py's SpeechResult.effect_at()) is set, each body group's and the mouth's
-    color is run through effect_color() first, using ``now`` as that
-    effect's animation clock - groups outside the effect's target are left
-    at their plain color (see effect_color()). The eye's blink is always
-    left alone, so it keeps blinking independently of any effect.
+    voice.py's SpeechResult.effect_at()) is set, each targeted body group's
+    and the mouth's color is run through effect_color() first, using
+    ``now`` as that effect's animation clock - except [rainbow], which
+    instead paints a traveling gradient across each targeted group's own
+    lights (see _rainbow_colors()), since a single shared hue for the
+    whole group reads as a plain color pulse, not "a rainbow". Groups
+    outside the effect's target are left at their plain color. The eye's
+    blink is always left alone, so it keeps blinking independently of any
+    effect.
     """
     band_config = band_config if band_config is not None else config.BAND_CONFIG
     frame = np.zeros((layout.total_pixels, 3), dtype=np.uint8)
 
-    def paint(group_name: str, color: tuple[int, int, int]) -> None:
+    def paint(group_name: str, color: tuple[int, int, int] | list[tuple[int, int, int]]) -> None:
         nodes = layout.groups[group_name]
         pixel_indices = [layout.node_to_pixel_index(n) for n in nodes]
-        frame[pixel_indices] = (np.array(color, dtype=np.float64) * brightness).astype(np.uint8)
+        colors = np.asarray(color, dtype=np.float64)
+        if colors.ndim == 1:
+            colors = np.broadcast_to(colors, (len(pixel_indices), 3))
+        frame[pixel_indices] = (colors * brightness).astype(np.uint8)
 
     for name, (_, _, color) in band_config.items():
         if name == "Eye":
             paint("Open Eye" if eye_open else "Closed Eye", color)
+        elif _rainbow_targets(effect, name):
+            paint(name, _rainbow_colors(now, len(layout.groups[name])))
         else:
             paint(name, effect_color(effect, now, color, name))
 
     _, _, mouth_color = band_config["Head"]
     mouth_group = "Open Mouth" if mouth_open else "Closed Mouth"
-    paint(mouth_group, effect_color(effect, now, mouth_color, "Head"))
+    if _rainbow_targets(effect, "Head"):
+        paint(mouth_group, _rainbow_colors(now, len(layout.groups[mouth_group])))
+    else:
+        paint(mouth_group, effect_color(effect, now, mouth_color, "Head"))
     return frame.tobytes()
 
 
