@@ -161,24 +161,24 @@ def main() -> None:
     """Parse CLI arguments, render the preview, and save it to disk."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--rgbeffects", type=Path, default=DEFAULT_RGBEFFECTS, help="Path to xlights_rgbeffects.xml"
+        "--rgbeffects", type=Path, default=DEFAULT_RGBEFFECTS, help="Path to xlights_rgbeffects.xml."
     )
-    parser.add_argument("--scale", type=int, default=10, help="Pixels per grid cell in the output image")
+    parser.add_argument("--scale", type=int, default=10, help="Pixels per grid cell in the output image.")
     parser.add_argument(
-        "--out", type=Path, default=Path("layout_preview.png"), help="Output PNG path"
+        "--out", type=Path, default=Path("layout_preview.png"), help="Output PNG path."
     )
     parser.add_argument(
         "--highlight-nodes",
         default=None,
         help="Node range to highlight with a rainbow gradient, e.g., '1-10' - matches "
         "what 'test_lights.py nodes --nodes 1-10' sends to the real hardware, for "
-        "direct comparison",
+        "direct comparison.",
     )
     parser.add_argument(
         "--only-group",
         default=None,
         help="Draw just this one group in white and everything else in gray, instead "
-        "of every group in its own color - isolates a single group's shape",
+        "of every group in its own color - isolates a single group's shape.",
     )
     args = parser.parse_args()
 

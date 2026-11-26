@@ -103,9 +103,9 @@ def main() -> None:
         "--fseq",
         type=Path,
         default=None,
-        help="Path to a specific .fseq file (default: auto-detect in the show directory)",
+        help="Path to a specific .fseq file (default: auto-detect in the show directory).",
     )
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT, help="Output JSON path")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT, help="Output JSON path.")
     args = parser.parse_args()
 
     fseq_path = args.fseq or _find_fseq(DEFAULT_SHOW_DIR)

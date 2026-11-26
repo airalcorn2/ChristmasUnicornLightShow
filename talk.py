@@ -17,9 +17,12 @@ Run directly:
 from __future__ import annotations
 
 import argparse
+import colorsys
 import io
+import math
 import os
 import queue
+import random
 import subprocess
 import sys
 import tempfile
@@ -171,22 +174,78 @@ def get_reply(chat: Chat, user_text: str) -> str:
     return chat.send_message(user_text).text
 
 
+def _hue_to_rgb(hue: float) -> tuple[int, int, int]:
+    """Convert a hue (0-1) at full saturation/value to an (r, g, b) triple."""
+    r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def effect_color(
+    effect: tuple[str, str] | None,
+    now: float,
+    base_color: tuple[int, int, int],
+    group_name: str,
+) -> tuple[int, int, int]:
+    """Return the color ``group_name`` (a body group, or "Head" for the
+    mouth, which mirrors Head's color) should show right now, given the
+    active (name, target) effect (or None, which just passes ``base_color``
+    through unchanged) - see config.EFFECT_NAMES/config.EFFECT_TARGETS.
+
+    If the effect's target isn't "all" and doesn't match ``group_name``,
+    this group sits the effect out and keeps ``base_color`` - that's how a
+    tag like "[sparkle:Horn]" only lights up the Horn.
+
+    [sparkle] picks a random bright color per call (so each targeted group
+    flickers independently - this is called once per group per frame);
+    [rainbow] cycles hue smoothly, the same for every targeted group at a
+    given instant; [glow] modulates ``base_color``'s own brightness up and
+    down, so it reads as "the unicorn's own colors breathing" rather than a
+    new palette; [flash] is just solid white.
+    """
+    if effect is None:
+        return base_color
+    effect_name, target = effect
+    if target != "all" and target != group_name:
+        return base_color
+    if effect_name == "sparkle":
+        return random.choice(config.EFFECT_SPARKLE_COLORS)
+    if effect_name == "rainbow":
+        hue = (now / config.EFFECT_RAINBOW_PERIOD) % 1.0
+        return _hue_to_rgb(hue)
+    if effect_name == "glow":
+        phase = (now % config.EFFECT_GLOW_PERIOD) / config.EFFECT_GLOW_PERIOD
+        glow_factor = 0.4 + 0.6 * (0.5 + 0.5 * math.sin(2 * math.pi * phase))
+        return tuple(int(channel * glow_factor) for channel in base_color)
+    if effect_name == "flash":
+        return (255, 255, 255)
+    return base_color  # An unrecognized name (shouldn't happen - extract_effect_tags() only
+    # ever returns names from config.EFFECT_NAMES) - fail safe to the plain color.
+
+
 def build_talk_frame(
     layout: UnicornLayout,
     mouth_open: bool,
     eye_open: bool,
     brightness: float,
     band_config: dict[str, config.BandConfig] | None = None,
+    effect: tuple[str, str] | None = None,
+    now: float = 0.0,
 ) -> bytes:
     """Render one DDP payload for talk mode: every band_config group
-    (Head, Mane, Trim, Hat, Horn) lit solidly at its peak color - the
-    whole unicorn, not just the face - plus the mouth/eye animated live
-    on top (mouth mirrors Head's color, same convention as equalizer.py's
+    (Head, Mane, Trim, Hat, Horn) lit at its peak color - the whole
+    unicorn, not just the face - plus the mouth/eye animated live on top
+    (mouth mirrors Head's color, same convention as equalizer.py's
     build_frame()).
 
     ``band_config`` defaults to config.BAND_CONFIG (hand-picked colors) but
     can be config.official_band_config() instead - see run_conversation()'s
-    ``use_official_colors``.
+    ``use_official_colors``. If ``effect`` (a (name, target) pair - see
+    config.EFFECT_NAMES/config.EFFECT_TARGETS/voice.py's
+    SpeechResult.effect_at()) is set, each body group's and the mouth's
+    color is run through effect_color() first, using ``now`` as that
+    effect's animation clock - groups outside the effect's target are left
+    at their plain color (see effect_color()). The eye's blink is always
+    left alone, so it keeps blinking independently of any effect.
     """
     band_config = band_config if band_config is not None else config.BAND_CONFIG
     frame = np.zeros((layout.total_pixels, 3), dtype=np.uint8)
@@ -200,10 +259,11 @@ def build_talk_frame(
         if name == "Eye":
             paint("Open Eye" if eye_open else "Closed Eye", color)
         else:
-            paint(name, color)
+            paint(name, effect_color(effect, now, color, name))
 
     _, _, mouth_color = band_config["Head"]
-    paint("Open Mouth" if mouth_open else "Closed Mouth", mouth_color)
+    mouth_group = "Open Mouth" if mouth_open else "Closed Mouth"
+    paint(mouth_group, effect_color(effect, now, mouth_color, "Head"))
     return frame.tobytes()
 
 
@@ -241,11 +301,15 @@ def play_speech(
             now = time.monotonic()
             if now >= next_send:
                 next_send = now + frame_interval
-                mouth_open = speech.mouth_open_at(now - start)
+                elapsed = now - start
+                mouth_open = speech.mouth_open_at(elapsed)
                 eye_open = blink.is_open(now)
+                effect = speech.effect_at(elapsed)
                 if sender is not None:
                     sender.send_frame(
-                        build_talk_frame(layout, mouth_open, eye_open, brightness, band_config)
+                        build_talk_frame(
+                            layout, mouth_open, eye_open, brightness, band_config, effect, now
+                        )
                     )
     finally:
         player.wait(timeout=5)
@@ -382,7 +446,7 @@ def main() -> None:
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--list-devices", action="store_true", help="List audio devices and exit"
+        "--list-devices", action="store_true", help="List audio devices and exit."
     )
     parser.add_argument(
         "--device",
@@ -394,37 +458,37 @@ def main() -> None:
     parser.add_argument(
         "--controller-ip",
         default=None,
-        help="Override the controller IP parsed from xlights_networks.xml",
+        help="Override the controller IP parsed from xlights_networks.xml.",
     )
     parser.add_argument(
         "--brightness",
         type=float,
         default=config.TALK_BRIGHTNESS,
-        help="0-1 overall power cap for the whole unicorn while talking",
+        help="0-1 overall power cap for the whole unicorn while talking.",
     )
     parser.add_argument(
         "--official-colors",
         action="store_true",
         help="Use each group's dominant color from the real show's rendered .fseq "
         "(see show_colors.py) instead of config.BAND_CONFIG's hand-picked ones - "
-        "same flag as equalizer.py's",
+        "same flag as equalizer.py's.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Skip sending DDP packets (audio/Claude/ElevenLabs calls still happen)",
+        help="Skip sending DDP packets (audio/Claude/ElevenLabs calls still happen).",
     )
     parser.add_argument(
         "--save-fixture",
         type=Path,
         default=None,
         help="Synthesize --text once via ElevenLabs, cache it at this path, and exit - "
-        "see --replay to test against it repeatedly afterwards",
+        "see --replay to test against it repeatedly afterwards.",
     )
     parser.add_argument(
         "--text",
         default=None,
-        help="Text to synthesize - required with --save-fixture",
+        help="Text to synthesize - required with --save-fixture.",
     )
     parser.add_argument(
         "--replay",
@@ -432,7 +496,7 @@ def main() -> None:
         default=None,
         help="Replay a fixture saved by --save-fixture over and over (press Enter to "
         "repeat), instead of the mic/Gemini conversation loop - for tuning the mouth "
-        "timeline against the same real audio without new API calls each time",
+        "timeline against the same real audio without new API calls each time.",
     )
     parser.add_argument(
         "--mouth-test",
@@ -440,7 +504,7 @@ def main() -> None:
         help="Toggle just the mouth open/closed every second, forever - an isolated "
         "hardware check with no TTS/Gemini/alignment logic involved, to confirm "
         "'Open Mouth'/'Closed Mouth' actually look open/closed before trusting any "
-        "timing logic built on top of that assumption",
+        "timing logic built on top of that assumption.",
     )
     args = parser.parse_args()
 

@@ -100,7 +100,7 @@ def _parse_node_set(tag_text: str) -> set[int]:
     ``lineN="..."`` grid attributes.
 
     Cell position within a line is irrelevant here - only which node numbers
-    appear at all, i.e. which nodes are members of this submodel.
+    appear at all, i.e., which nodes are members of this submodel.
     """
     nodes: set[int] = set()
     for line in _LINE_RE.findall(tag_text):

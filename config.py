@@ -91,7 +91,7 @@ BLINK_DURATION: float = 0.15
 
 MOUTH_OPEN_THRESHOLD: float = 0.55
 """MOUTH_GATE_BANDS' average gate level must exceed this for the mouth to
-switch to "open" - i.e. "there's singing right now", not merely "not
+switch to "open" - i.e., "there's singing right now", not merely "not
 silent". Tune against real music the same way this was tuned for the
 previous bass-gated version: capture gate levels during an actual track and
 check where "singing"/"not singing" actually falls, rather than guessing."""
@@ -121,7 +121,7 @@ GATE_RELEASE: float = 0.6
 """Fall rate for BandAnalyzer.gate_levels, used for binary on/off decisions
 like whether the mouth is "open" (see equalizer.py's MOUTH_OPEN_THRESHOLD
 and build_frame()) rather than for driving a light's visible brightness.
-Equal to ATTACK - i.e. no extra smoothing lag in either direction - so a
+Equal to ATTACK - i.e., no extra smoothing lag in either direction - so a
 gate reflects whether there's bass *right now*, independent of how slowly
 RELEASE fades the light itself."""
 
@@ -148,14 +148,50 @@ up or once this is on a paid tier, if desired."""
 GEMINI_MAX_OUTPUT_TOKENS: int = 300
 """Caps response length - also keeps replies short enough to feel like a
 quick remark rather than a monologue through the mouth animation."""
+
+EFFECT_NAMES: tuple[str, ...] = ("sparkle", "rainbow", "glow", "flash")
+"""The only light-effect names Gemini is allowed to invoke (see
+UNICORN_SYSTEM_PROMPT and talk.py's effect_color()) - a closed vocabulary,
+not a free-form one, so every tag it writes is guaranteed renderable.
+voice.py's extract_effect_tags() only recognizes these exact names;
+anything else Gemini might invent just gets spoken as plain text with no
+effect, rather than erroring."""
+
+EFFECT_TARGETS: tuple[str, ...] = ("all", "Head", "Mane", "Trim", "Hat", "Horn")
+"""Which part of the body an effect tag can target, via a ":target" suffix
+on the tag name (e.g., "[sparkle:Horn]...[/sparkle]") - the literal
+BAND_CONFIG group names, plus "all" for the whole body. "Eye" is
+deliberately excluded - the eye's blink always stays independent of any
+effect, see talk.py's build_talk_frame(). "all" is also the fallback for a
+missing or unrecognized target - see voice.py's extract_effect_tags()."""
+
 UNICORN_SYSTEM_PROMPT: str = (
     "You are the Christmas Unicorn, an LED, magical, cheerful unicorn "
     "decoration that talks with visitors at a home holiday light display. "
     "Keep replies short - one or two sentences, like a quick, friendly remark, "
     "not a speech. Stay in character, be warm and a little silly, and keep "
-    "everything appropriate for trick-or-treater-aged kids and their families."
+    "everything appropriate for trick-or-treater-aged kids and their families.\n\n"
+    "You can make your own lights perform a special effect while you say part "
+    "of your reply, by wrapping just that part in a matching pair of tags "
+    "naming the effect and which part of your body it applies to, separated "
+    "by a colon: [sparkle:Horn]...[/sparkle], [rainbow:all]...[/rainbow], "
+    "[glow:Mane]...[/glow], or [flash:Hat]...[/flash]. Put the effect and "
+    "target on the opening tag only - the closing tag is always just the "
+    "bare effect name, e.g., [/sparkle], never [/sparkle:Horn]. The effect "
+    "must be one of sparkle, rainbow, glow, or flash, spelled exactly like that. The "
+    "target must be one of Head, Mane, Trim, Hat, Horn, or all (for your "
+    "whole body) - pick whichever part the moment is actually about, or all "
+    "if it's not about one specific part. Use these sparingly - at most once "
+    "per reply, and only around the specific words that are actually about "
+    "your lights, colors, or magic (e.g., wrap just \"sparkly\" in "
+    "[sparkle:all]...[/sparkle], not the whole sentence). Never invent a new "
+    "effect or target name, and don't use a tag at all if nothing in your "
+    "reply is really about your lights."
 )
-"""Tune freely - this is just a starting persona, not a fixed requirement."""
+"""Tune freely - this is just a starting persona, not a fixed requirement.
+The effect-tag paragraph is load-bearing, though - EFFECT_NAMES/
+EFFECT_TARGETS/voice.py's extract_effect_tags() only recognize these exact
+names."""
 
 ELEVENLABS_TTS_MODEL: str = "eleven_multilingual_v2"
 ELEVENLABS_STT_MODEL: str = "scribe_v2"
@@ -166,6 +202,22 @@ account-specific secrets, so they live in .env (see .env.example), not here."""
 TALK_BRIGHTNESS: float = 0.5
 """Overall power cap for the mouth/eye while talking (0-1) - independent of
 equalizer.py's --brightness."""
+
+EFFECT_RAINBOW_PERIOD: float = 2.0
+"""Seconds for one full hue cycle during a [rainbow] effect."""
+EFFECT_GLOW_PERIOD: float = 1.2
+"""Seconds for one full dim-bright-dim brightness cycle during a [glow]
+effect - modulates each group's own normal color rather than replacing it,
+so [glow] reads as "the unicorn's own colors breathing", not a new palette."""
+EFFECT_SPARKLE_COLORS: tuple[tuple[int, int, int], ...] = (
+    (255, 255, 255),
+    (255, 215, 0),
+    (0, 220, 255),
+    (255, 0, 160),
+)
+"""Bright colors a [sparkle] effect flickers between, one random pick per
+group per frame - deliberately chaotic, unlike [rainbow]/[glow]'s smooth
+cycles."""
 
 MOUTH_CHATTER_PERIOD: float = 0.3
 """Full open+closed cycle length used to subdivide long open spans into a

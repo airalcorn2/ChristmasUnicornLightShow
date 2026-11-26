@@ -114,7 +114,7 @@ class AudioStream:
         """Prepare (but do not yet start) a capture from ``device``.
 
         ``device`` is a PulseAudio/PipeWire source name, or ``None`` to use
-        the default sink's monitor (i.e. this machine's own audio output).
+        the default sink's monitor (i.e., this machine's own audio output).
         """
         self._device = device or _default_monitor_source()
         self._sample_rate = sample_rate

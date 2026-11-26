@@ -212,26 +212,26 @@ def main() -> None:
         help="groups: one named group at a time | chase: one pixel at a time across "
         "the whole string | all: every pixel the same color | off: blackout | "
         "nodes: light specific 1-based node numbers at once in a rainbow gradient "
-        "(see --nodes), for comparing against preview_layout.py --highlight-nodes",
+        "(see --nodes), for comparing against preview_layout.py --highlight-nodes.",
     )
-    parser.add_argument("--controller-ip", default=None, help="Override controller IP")
+    parser.add_argument("--controller-ip", default=None, help="Override controller IP.")
     parser.add_argument(
-        "--nodes", default=None, help="Node range for 'nodes' mode, e.g., '1-10' or '1,3,5'"
+        "--nodes", default=None, help="Node range for 'nodes' mode, e.g., '1-10' or '1,3,5'."
     )
     parser.add_argument(
         "--group",
         default=None,
         help="Limit 'groups' mode to a single named group (e.g., 'Horn'), held until --hold "
-        "expires, instead of cycling through all of them",
+        "expires, instead of cycling through all of them.",
     )
-    parser.add_argument("--color", type=parse_color, default=WHITE, help="e.g., 'ff0000' or '255,0,0'")
-    parser.add_argument("--brightness", type=float, default=0.3, help="0-1 scale applied to --color")
+    parser.add_argument("--color", type=parse_color, default=WHITE, help="e.g., 'ff0000' or '255,0,0'.")
+    parser.add_argument("--brightness", type=float, default=0.3, help="0-1 scale applied to --color.")
     parser.add_argument(
-        "--hold", type=float, default=2.0, help="Seconds per group (groups mode) or total duration (all mode)"
+        "--hold", type=float, default=2.0, help="Seconds per group (groups mode) or total duration (all mode)."
     )
-    parser.add_argument("--pixel-delay", type=float, default=0.05, help="Seconds per pixel (chase mode)")
+    parser.add_argument("--pixel-delay", type=float, default=0.05, help="Seconds per pixel (chase mode).")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Print what would be sent instead of sending DDP packets"
+        "--dry-run", action="store_true", help="Print what would be sent instead of sending DDP packets."
     )
     args = parser.parse_args()
 

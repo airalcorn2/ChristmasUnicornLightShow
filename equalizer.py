@@ -169,39 +169,39 @@ def main() -> None:
     """Parse CLI arguments and run the equalizer (or list audio devices)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--list-devices", action="store_true", help="List audio devices and exit"
+        "--list-devices", action="store_true", help="List audio devices and exit."
     )
     parser.add_argument(
         "--device",
         default=None,
         help="PulseAudio/PipeWire source name to record from (use --list-devices to "
-        "find it). Defaults to the default sink's monitor, i.e. this machine's "
+        "find it). Defaults to the default sink's monitor, i.e., this machine's "
         "audio output.",
     )
     parser.add_argument(
         "--controller-ip",
         default=None,
-        help="Override the controller IP parsed from xlights_networks.xml",
+        help="Override the controller IP parsed from xlights_networks.xml.",
     )
-    parser.add_argument("--fps", type=int, default=config.FPS, help="Pixel update rate")
+    parser.add_argument("--fps", type=int, default=config.FPS, help="Pixel update rate.")
     parser.add_argument(
         "--brightness",
         type=float,
         default=0.3,
         help="0-1 overall power cap on top of each band's own level (defaults to a dim "
         "0.3, matching test_lights.py's safety default, so a first run doesn't blast "
-        "the string at full power)",
+        "the string at full power).",
     )
     parser.add_argument(
         "--official-colors",
         action="store_true",
         help="Use each group's dominant color from the real show's rendered .fseq "
-        "(see show_colors.py) instead of config.BAND_CONFIG's hand-picked ones",
+        "(see show_colors.py) instead of config.BAND_CONFIG's hand-picked ones.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print band levels instead of sending DDP packets (no hardware needed)",
+        help="Print band levels instead of sending DDP packets (no hardware needed).",
     )
     args = parser.parse_args()
 

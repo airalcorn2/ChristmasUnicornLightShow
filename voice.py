@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from pathlib import Path
 
 import requests
@@ -43,14 +44,24 @@ def list_voices() -> list[dict]:
 
 class SpeechResult:
     """One synthesized line: the audio bytes (``config.ELEVENLABS_OUTPUT_FORMAT``,
-    mp3 by default) and a mouth open/closed timeline derived from ElevenLabs'
-    per-character timestamps.
+    mp3 by default), a mouth open/closed timeline, and any light-effect cues
+    (see config.EFFECT_NAMES), both derived from ElevenLabs' per-character
+    timestamps.
     """
 
-    def __init__(self, audio_bytes: bytes, open_intervals: list[tuple[float, float]]) -> None:
-        """Store the synthesized audio and its mouth-open (start, end) times."""
+    def __init__(
+        self,
+        audio_bytes: bytes,
+        open_intervals: list[tuple[float, float]],
+        effect_cues: list[tuple[str, str, float, float]] | None = None,
+    ) -> None:
+        """Store the synthesized audio, its mouth-open (start, end) times,
+        and its (name, target, start, end) effect cues (see
+        extract_effect_tags()).
+        """
         self.audio_bytes = audio_bytes
         self.open_intervals = open_intervals
+        self.effect_cues = effect_cues if effect_cues is not None else []
 
     def duration(self) -> float:
         """Return the audio's total duration in seconds, per the last open interval's end."""
@@ -58,9 +69,19 @@ class SpeechResult:
 
     def mouth_open_at(self, elapsed: float) -> bool:
         """Return whether the mouth should be open ``elapsed`` seconds into
-        playback, i.e. whether ``elapsed`` falls inside any open interval.
+        playback, i.e., whether ``elapsed`` falls inside any open interval.
         """
         return any(start <= elapsed < end for start, end in self.open_intervals)
+
+    def effect_at(self, elapsed: float) -> tuple[str, str] | None:
+        """Return the (name, target) of the light effect active ``elapsed``
+        seconds into playback, or None. If cues overlap, the first one (in
+        the order Gemini wrote them) wins - effects aren't designed to blend.
+        """
+        for name, target, start, end in self.effect_cues:
+            if start <= elapsed < end:
+                return (name, target)
+        return None
 
 
 _CLOSED_LETTERS = frozenset("mbp")
@@ -159,6 +180,75 @@ def _apply_chatter(intervals: list[tuple[float, float]]) -> list[tuple[float, fl
     return chattered
 
 
+_EFFECT_TAG_PATTERN = re.compile(
+    r"\[(" + "|".join(config.EFFECT_NAMES) + r")(?::(\w+))?\](.*?)\[/\1(?::\w+)?\]", re.DOTALL
+)
+"""Matches e.g., "[sparkle:Horn]...[/sparkle]" for any name in
+config.EFFECT_NAMES, with an optional ":target" naming which part of the
+body it applies to (see config.EFFECT_TARGETS) - see extract_effect_tags().
+
+The closing tag's own optional ":target" (e.g., "[/sparkle:Horn]") is
+matched but ignored - only the opening tag's target is used. Gemini was
+observed echoing the target on the closing tag too, which a stricter
+"[/sparkle]"-only pattern failed to match at all, leaving the whole literal
+tagged text (brackets included) unstripped and spoken aloud by ElevenLabs."""
+
+
+def extract_effect_tags(raw_text: str) -> tuple[str, list[tuple[str, str, int, int]]]:
+    """Strip Gemini's inline effect tags (e.g., "[sparkle:Horn]...[/sparkle]")
+    out of ``raw_text``, returning the clean text to actually speak plus each
+    cue's (name, target, start, end) - the effect name, which body part it
+    targets (config.EFFECT_TARGETS, defaulting to "all" if missing or
+    unrecognized), and *character offsets within that clean text* for start/
+    end, i.e., where the tagged words fall once the tags themselves are gone.
+
+    Those offsets get turned into playback *times* in _cues_to_time_ranges(),
+    once ElevenLabs has timestamped the clean text - the same "character
+    position -> time" idea _open_intervals_from_alignment() already uses for
+    mouth timing, just applied to cue markers instead of M/B/P letters.
+    """
+    clean_parts: list[str] = []
+    cues: list[tuple[str, str, int, int]] = []
+    clean_pos = 0
+    last_end = 0
+    for match in _EFFECT_TAG_PATTERN.finditer(raw_text):
+        before = raw_text[last_end : match.start()]
+        clean_parts.append(before)
+        clean_pos += len(before)
+
+        effect_name = match.group(1)
+        target = match.group(2) if match.group(2) in config.EFFECT_TARGETS else "all"
+        inner_text = match.group(3)
+        start = clean_pos
+        clean_parts.append(inner_text)
+        clean_pos += len(inner_text)
+        cues.append((effect_name, target, start, clean_pos))
+
+        last_end = match.end()
+    clean_parts.append(raw_text[last_end:])
+    return "".join(clean_parts), cues
+
+
+def _cues_to_time_ranges(
+    cues: list[tuple[str, str, int, int]], alignment: dict
+) -> list[tuple[str, str, float, float]]:
+    """Convert extract_effect_tags()'s character-offset cues into (name,
+    target, start_seconds, end_seconds), via the same alignment data
+    _open_intervals_from_alignment() uses for mouth timing.
+    """
+    starts = alignment["character_start_times_seconds"]
+    ends = alignment["character_end_times_seconds"]
+    num_characters = len(starts)
+
+    time_ranges: list[tuple[str, str, float, float]] = []
+    for name, target, start_index, end_index in cues:
+        if start_index >= num_characters:
+            continue  # The cue wrapped only whitespace/nothing real.
+        last_index = min(end_index, num_characters) - 1
+        time_ranges.append((name, target, starts[start_index], ends[last_index]))
+    return time_ranges
+
+
 def _tts_request(text: str) -> dict:
     """POST ``text`` to ElevenLabs' with-timestamps endpoint and return the
     raw JSON payload (audio_base64 + alignment) - the one network call
@@ -182,28 +272,44 @@ def _tts_request(text: str) -> dict:
     return response.json()
 
 
-def _speech_result_from_payload(payload: dict) -> SpeechResult:
+def _speech_result_from_payload(
+    payload: dict, cues: list[tuple[str, str, int, int]] | None = None
+) -> SpeechResult:
     """Build a SpeechResult from a raw ElevenLabs with-timestamps payload,
-    re-deriving the mouth timeline from its alignment data every time -
-    see load_fixture()'s docstring for why that matters.
+    re-deriving the mouth timeline (and, if ``cues`` is given, the effect
+    timeline) from its alignment data every time - see load_fixture()'s
+    docstring for why that matters.
     """
     audio_bytes = base64.b64decode(payload["audio_base64"])
     open_intervals = _open_intervals_from_alignment(payload["alignment"])
-    return SpeechResult(audio_bytes, open_intervals)
+    effect_cues = _cues_to_time_ranges(cues, payload["alignment"]) if cues else []
+    return SpeechResult(audio_bytes, open_intervals, effect_cues)
 
 
 def synthesize(text: str) -> SpeechResult:
     """Synthesize ``text`` to speech via ElevenLabs, returning the audio plus
-    a derived mouth open/closed timeline (see SpeechResult).
+    a derived mouth open/closed timeline and any light-effect cues (see
+    SpeechResult).
+
+    ``text`` may contain inline effect tags (e.g., "[sparkle:Horn]...[/sparkle]",
+    see config.EFFECT_NAMES/config.EFFECT_TARGETS/config.UNICORN_SYSTEM_PROMPT) -
+    extract_effect_tags() strips them before this is actually spoken, so
+    ElevenLabs never has to pronounce a bracket.
     """
-    return _speech_result_from_payload(_tts_request(text))
+    clean_text, cues = extract_effect_tags(text)
+    return _speech_result_from_payload(_tts_request(clean_text), cues)
 
 
 def save_fixture(text: str, path: Path) -> None:
     """Call ElevenLabs once for ``text`` and cache the raw response JSON at
     ``path`` - see load_fixture() to replay it without further API calls.
+
+    Strips any effect tags first (see extract_effect_tags()) so a bracket
+    never ends up spoken aloud, but doesn't persist them - fixtures are for
+    tuning mouth timing (see --replay), not effect timing.
     """
-    payload = _tts_request(text)
+    clean_text, _ = extract_effect_tags(text)
+    payload = _tts_request(clean_text)
     with open(path, "w") as f:
         json.dump(payload, f)
 

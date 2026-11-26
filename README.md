@@ -92,14 +92,60 @@ Audio capture uses `parec` (PulseAudio/PipeWire CLI) to read the system's defaul
 
 Do this first if nothing lights up.
 Full build notes (parts list, controller config, model design) are at https://github.com/airalcorn2/ChristmasUnicornLightShow.
-The one step from there that's easy to forget, since it doesn't persist across reboots/sleep/USB-Ethernet replugs, is putting this machine on the controller's subnet:
+
+**Current setup: a Raspberry Pi bridge.**
+The controller is wired via Ethernet to a Raspberry Pi (`cauldron`), which joins the home Wi-Fi itself - so this machine reaches the controller over Wi-Fi, with no direct cable to it at all.
+
+On the Pi, one-time setup (survives reboots):
+
+```bash
+# eth0 (wired to the controller) gets a narrow /30, not a full /24 - deliberately
+# tiny (just enough to cover the controller's own 192.168.1.50), so it can never
+# compete with the Pi's own wlan0 for the much broader home-network 192.168.1.0/24
+# range. A same-size /24 on both interfaces was tried first and broke the Pi's own
+# Wi-Fi reachability outright - the kernel's routing table had no reliable way to
+# tell "home network" traffic apart from "controller" traffic since both claimed
+# the identical prefix.
+sudo nmcli connection modify "Wired connection 1" ipv4.method manual ipv4.addresses 192.168.1.49/30
+sudo nmcli connection up "Wired connection 1"
+
+# Forward packets between the Pi's two interfaces, and NAT (masquerade) anything
+# headed out to the controller - so the controller only ever sees traffic from the
+# Pi's own address and never needs to know how to route a reply back to this
+# machine specifically.
+echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/99-unicorn-bridge.conf
+sudo sysctl -p /etc/sysctl.d/99-unicorn-bridge.conf
+sudo tee -a /etc/nftables.conf > /dev/null <<'EOF'
+
+table ip nat {
+	chain postrouting {
+		type nat hook postrouting priority 100;
+		oifname "eth0" masquerade
+	}
+}
+EOF
+sudo systemctl enable --now nftables
+```
+
+On this machine, once per session (does not persist across reboots/reconnects - a quick re-run if the controller stops responding):
+
+```bash
+sudo ip route add 192.168.1.50/32 via 192.168.1.207   # 192.168.1.207 is the Pi's current Wi-Fi IP
+```
+
+A `/32` host route, not a `/24` network route, for the same reason as the Pi's own `/30` above: this machine's home Wi-Fi is *also* on `192.168.1.0/24`, so routing the whole range through the Pi would break this machine's own normal network traffic - only that one specific address needs to detour through the Pi.
+
+The Pi's own Wi-Fi IP is DHCP-assigned and can change after a reboot - check `ping cauldron.local` (or your router's DHCP client list) for its current address if the route above stops working, or set a DHCP reservation for it on your router so it never changes.
+
+**Alternative: direct Ethernet connection.**
+If the Pi bridge isn't set up (or the Pi's down), this machine can still talk to the controller directly, the original way - the one step that's easy to forget, since it doesn't persist across reboots/sleep/USB-Ethernet replugs, is putting this machine on the controller's subnet:
 
 ```
 ip addr   # find the Ethernet/USB-adapter interface, e.g., enp0s20f0u1c2
 sudo ip addr add 192.168.1.100/24 dev <interface>
 ```
 
-If the controller's IP (192.168.1.50 per `xlights_networks.xml`) isn't pingable or reachable at `http://192.168.1.50` in a browser, this is almost certainly why - and it'll block xLights' own Test/output just as much as it blocks this project's scripts.
+Either way: if the controller's IP (192.168.1.50 per `xlights_networks.xml`) isn't pingable or reachable at `http://192.168.1.50` in a browser, start here - and it'll block xLights' own Test/output just as much as it blocks this project's scripts.
 
 ## Usage
 
@@ -174,6 +220,11 @@ This is why `talk.py` doesn't need anything like `audio.py`'s envelope followers
 
 While talking, every `config.BAND_CONFIG` group (Head, Mane, Trim, Hat, Horn) is lit solidly at its `equalizer.py` peak color - the whole unicorn, not just the face - with the mouth/eye animated live on top (`talk.py`'s `build_talk_frame()`).
 
+**Light effects:** Gemini can make its own lights perform a special effect, targeted at a specific body part, while saying part of a reply - by wrapping that part in a tag naming the effect and target separated by a colon: `[sparkle:Horn]...[/sparkle]`, `[rainbow:all]...[/rainbow]`, `[glow:Mane]...[/glow]`, `[flash:Hat]...[/flash]` (see `config.UNICORN_SYSTEM_PROMPT`, which also tells it to use these sparingly and only around words actually about its lights/colors/magic).
+The effect must be one of `config.EFFECT_NAMES`; the target must be one of `config.EFFECT_TARGETS` - a literal `BAND_CONFIG` group name, or `all` for the whole body (also the fallback if the target's missing or unrecognized - Eye is deliberately not a valid target, so the eye's blink always stays independent of any effect).
+`voice.py`'s `extract_effect_tags()` strips the tags out before the text is ever sent to ElevenLabs - so a bracket is never spoken aloud - while remembering where in the *clean* text each tag's contents fall; once ElevenLabs timestamps that clean text, those character positions turn into exact playback times the same way mouth timing does, via `_cues_to_time_ranges()`.
+`talk.py`'s `effect_color()` renders each effect (`[sparkle]` flickers randomly between a few bright colors per group per frame, `[rainbow]` cycles hue smoothly, `[glow]` pulses each group's own color up and down, `[flash]` is solid white) for exactly the cue's time window, but only on the targeted group(s) - every other group keeps its normal color, and the eye's blink is left alone throughout regardless of target.
+
 **Tuning the mouth timing without burning API calls:** `--save-fixture` caches one real ElevenLabs response (audio + alignment) to a JSON file; `--replay` plays it back repeatedly (press Enter to repeat) through the same `build_talk_frame()`/DDP path real conversations use, re-deriving the mouth timeline from the cached alignment every time - so a change to `_open_intervals_from_alignment()`/`MOUTH_MERGE_GAP` can be checked against the exact same real speech over and over, with no new network calls and no different text each time.
 
 ```
@@ -186,3 +237,5 @@ python3 talk.py --replay test_fixture.json --dry-run    # or without --dry-run, 
 - Both `test_lights.py` and `equalizer.py` have been run live against the real controller/hardware (not just `--dry-run`), including the node-to-pixel mapping, individual group isolation, the audio-reactive bands, the eye blink, the mouth gate, and `--official-colors`.
 - If the system audio sink is idle, `parec` can take a second or two to wake it up before data starts flowing; that's expected, not a bug.
 - `talk.py` has been run live end-to-end (mic -> transcription -> Gemini -> ElevenLabs -> real hardware) - the mouth timing specifically is still being tuned against real playback (see `--replay` above), so treat its current feel as a work in progress rather than finished.
+- Light effects (`[sparkle:target]`/`[rainbow:target]`/`[glow:target]`/`[flash:target]`) have been verified against real Gemini replies and real ElevenLabs timing data: Gemini reliably wraps only the relevant phrase in a correctly-matched tag, picks a sensible target (the specific group asked about, or `all` when asked for everything at once), and the resulting cue's time window lines up with when that phrase is actually spoken - but this hasn't been watched on the real hardware yet, so do that before trusting it at the display.
+- The Raspberry Pi bridge (see [Network Setup](#network-setup)) has been verified end-to-end against the real controller: ICMP, the controller's HTTP API, and actual DDP/UDP frames (`equalizer.py` confirmed to light the real hardware) all traverse it correctly.
