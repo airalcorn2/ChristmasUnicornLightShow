@@ -4,6 +4,8 @@ zstandard
 requests
 google-genai
 python-dotenv
+aiohttp
+qrcode
 
 # talk.py's --pi mode also needs pygame (for gamepad.py), but NOT via pip here -
 # install it system-wide with `sudo apt install python3-pygame` (pulls in SDL2,

@@ -18,6 +18,8 @@ Pixel frames are sent straight to the Genius Pixel 16 controller over DDP, bypas
   - [Verifying the Hardware/Wiring](#verifying-the-hardwarewiring)
 - [Talking to the Unicorn](#talking-to-the-unicorn)
   - [Running Without a Laptop (`--pi`)](#running-without-a-laptop---pi)
+- [Trivia](#trivia)
+  - [A Kid-Friendly Question Bank](#a-kid-friendly-question-bank)
 - [Notes](#notes)
 
 ## Bands
@@ -77,6 +79,12 @@ Each module also runs directly for its own bench test, independent of the others
 | `gamepad.py` | USB gamepad input for `talk.py --pi`'s trigger, so a kid can hold a button instead of pressing Enter | `python3 gamepad.py` |
 | `test_lights.py` | Hardware verification: light up groups/nodes/the whole string on demand | `python3 test_lights.py groups --dry-run` |
 | `preview_layout.py` | Renders the parsed layout as a PNG, independent of the physical hardware | `python3 preview_layout.py` |
+| `trivia_data.py` | One-time prep for the trivia game: downloads/filters/samples a public Jeopardy! clue dataset to Christmas/holiday categories and voice-caches it | `python3 trivia_data.py --skip-audio` |
+| `trivia_kids.py` | Alternative one-time prep for a kids' crowd: generates original, family-friendly Christmas trivia with Gemini instead - a drop-in swap for `trivia_data.py`'s output | `python3 trivia_kids.py --skip-audio` |
+| `trivia_tiebreakers.py` | 50 hand-researched, individually-sourced numeric facts for trivia's sudden-death tiebreaker | - |
+| `trivia_lights.py` | Non-speech light animations for trivia (idle "thinking" rainbow, outcome flashes, round-winner flourish), built on `talk.build_talk_frame()` | - |
+| `trivia_web.py` | Generic aiohttp/WebSocket server for trivia's group screen + per-team phone pages | `python3 trivia_web.py` |
+| `trivia_game.py` | The trivia game itself: rules, Gemini judging, and orchestration - see [Trivia](#trivia) | `python3 trivia_game.py --dry-run` |
 
 ## Setup
 
@@ -272,6 +280,43 @@ Then, on the Pi:
 `gamepad.TALK_BUTTON` (currently button index 2) was confirmed by listening live for a real press with `python3 gamepad.py` run standalone, not guessed - re-confirm the same way if the physical gamepad ever changes.
 `config.PI_MIC_DEVICE`/`config.PI_SPEAKER_DEVICE` were confirmed the same way (`arecord -l`/`aplay -l` plus an actual recorded-and-played-back test), not assumed from the device names alone - re-confirm with those same commands if the webcam, speaker, or anything plugged in before them ever changes.
 
+## Trivia
+
+A two-team Christmas trivia game, separate from everything above: it's phone-driven rather than gamepad-driven, and runs as its own standalone script (`trivia_game.py`), not a `talk.py` flag - modeled closely on the `cauldron` Halloween project's own trivia game.
+
+Questions come from a [public Jeopardy! clue dataset](https://github.com/jwolle1/jeopardy_clue_dataset) (its own maintainer prefers not to credit where the clues were sourced from), filtered down to Christmas/holiday-adjacent categories and voice-cached ahead of time by `trivia_data.py` - run that once before a party:
+
+```bash
+.venv/bin/python trivia_data.py              # the real thing: downloads, filters, samples, and voice-caches
+.venv/bin/python trivia_data.py --skip-audio # just (re)write trivia/christmas_clues.json, no ElevenLabs calls - for tuning the keyword filter
+.venv/bin/python trivia_data.py --batch 1     # a whole new set of questions for another night (never shares a clue with batch 0)
+```
+
+It never runs during a live round. One extra dependency beyond the core project's for QR code generation: `qrcode` (already in `requirements.txt`).
+
+### A Kid-Friendly Question Bank
+
+For a kids' crowd, run `trivia_kids.py` instead:
+
+```bash
+.venv/bin/python trivia_kids.py
+```
+
+Rather than filtering the Jeopardy dataset, this generates original Christmas/holiday trivia with Gemini, aimed at roughly ages 6-10 and kept to family-friendly topics (Santa, reindeer, presents, snowmen, cookies, classic Christmas movies) rather than anything genuinely scary or inappropriate.
+It writes to the exact same `trivia/christmas_clues.json` and `trivia/audio/` that `trivia_data.py` does, so this is a drop-in swap - `trivia_game.py` doesn't change either way, and running `trivia_data.py` again later switches back to the adult, Jeopardy-sourced bank.
+Pass `--count` to change how many questions it generates (24 by default, split evenly across the two rounds), or `--skip-audio` to iterate on the generation prompt without waiting on ElevenLabs each time, same as `trivia_data.py`'s own flag.
+
+There's no `excluded_ids.json`-style review step here - these questions aren't pulled from a vetted dataset, they're freshly invented each run, so give `trivia/christmas_clues.json` a skim for accuracy and appropriateness before the party rather than assuming it's already been checked.
+There's also no `--batch` equivalent: just re-run the script for an entirely new set, since nothing here is seeded for reproducibility.
+
+Host a round with `.venv/bin/python trivia_game.py` (`--dry-run` to test the web/game flow without the real controller, `--pi` to run directly on the Raspberry Pi with ALSA audio, `--official-colors` to use the real show's own colors - same flags/conventions as `talk.py`/`equalizer.py`). It prints two addresses: a **group** screen (put this on a TV or other shared display) that opens on the game's title and a QR code per team, then switches to a live scoreboard and the current question once the round starts; and a **team** page per team, reached by scanning that team's QR code, where that team submits answers on their own phones.
+
+Play alternates strictly between the two teams each question - whichever team held a question, the other team holds the next one, regardless of who scored - with one twist: if the team up misses (or the clock runs out), the other team gets a one-time steal attempt at the same question before play moves on. Answers are free text - just the answer itself, not phrased as a question - graded live by Gemini rather than a human judge or a local heuristic; the same call also writes the Unicorn's in-character reaction, a gentle tease for a wrong answer or warm celebration for a right one, naming the visitors' actual answer and/or the correct one rather than reacting generically - and may use this project's own light-effect tags (see [Talking to the Unicorn](#talking-to-the-unicorn)), which fire for real through `talk.play_speech()` exactly as they do in normal conversation. Unlike every other mode in this project, that live grading means trivia genuinely needs network access during play, not just to prepare beforehand.
+
+A tied score once the question pool runs out goes to sudden death: a single numeric question from `trivia_tiebreakers.py` (50 hand-researched, individually-sourced facts, e.g. "how many reindeer pulled Santa's sleigh in the original 1823 poem?") that both teams guess at once - whichever guess lands closer wins outright, with a genuine coin flip if neither guess parses as a number or both land exactly as close. The round closes with a short recap line, written live by Gemini to reference how that specific game actually went (the final score, a category someone dominated, whether a steal or the tiebreaker settled it), not a generic "good game" line.
+
+Unlike `cauldron`'s three rotating witch personas, this project has exactly one ElevenLabs voice, so every line - clue reads, judging banter, the tiebreaker, the closing recap - is the same Christmas Unicorn persona throughout. See `trivia_game.py`'s own module docstring for the exact rules and the asyncio/lighting architecture (notably: only one thing may ever send DDP frames at a time, so `trivia_lights.py`'s idle animation is explicitly stopped before every spoken line and restarted only once it finishes).
+
 ## Notes
 
 - Both `test_lights.py` and `equalizer.py` have been run live against the real controller/hardware (not just `--dry-run`), including the node-to-pixel mapping, individual group isolation, the audio-reactive bands, the eye blink, the mouth gate, and `--official-colors`.
@@ -279,4 +324,5 @@ Then, on the Pi:
 - `talk.py` has been run live end-to-end (mic -> transcription -> Gemini -> ElevenLabs -> real hardware) - the mouth timing specifically is still being tuned against real playback (see `--replay` above), so treat its current feel as a work in progress rather than finished.
 - Light effects (`[sparkle:target]`/`[rainbow:target]`/`[glow:target]`/`[flash:target]`) have been verified against real Gemini replies and real ElevenLabs timing data: Gemini reliably wraps only the relevant phrase in a correctly-matched tag, picks a sensible target (the specific group asked about, or `all` when asked for everything at once), and the resulting cue's time window lines up with when that phrase is actually spoken - but this hasn't been watched on the real hardware yet, so do that before trusting it at the display.
 - The Raspberry Pi bridge (see [Network Setup](#network-setup)) has been verified end-to-end against the real controller: ICMP, the controller's HTTP API, and actual DDP/UDP frames (`equalizer.py` confirmed to light the real hardware) all traverse it correctly.
-- `--pi` mode: each individual piece of hardware has been verified in isolation on the real Pi (the gamepad's talk button detected live via a real press, the webcam mic confirmed capturing real non-silent audio, the headphone-jack speaker confirmed audible via `speaker-test`), but the mode as a whole - `talk.py --pi` actually running the full conversation loop end-to-end on the Pi - hasn't been tested yet. In particular, `_PLAYBACK_STARTUP_LATENCY` was tuned for `paplay` on a laptop and has not been re-measured for `aplay` on the Pi.
+- `--pi` mode: both the individual hardware (gamepad button, webcam mic, headphone-jack speaker) and the full conversation loop end-to-end have been run live on the real Pi, including real multi-turn conversations with correct mouth-sync and light effects. `_PLAYBACK_STARTUP_LATENCY` was tuned for `paplay` on a laptop and has not been separately re-measured for `aplay` on the Pi, though no sync issues have been observed there in practice.
+- Trivia (`trivia_game.py`): the web layer, full game rules (primary/steal/scoring/tiebreaker/coin-flip), live Gemini judging with effect-tag banter, and the finale have all been verified end-to-end via an automated WebSocket client driving a real `--dry-run` round - but it hasn't been played live against the real controller/hardware yet (mouth-sync and lighting during an actual round), and the Christmas keyword filter/50-question tiebreaker bank, while hand-reviewed, haven't been proofread by another person before a real party.

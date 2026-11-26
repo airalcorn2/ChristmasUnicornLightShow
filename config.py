@@ -145,6 +145,12 @@ cauldron uses the newer "gemini-3.8-flash", but that (and "gemini-3.7-flash")
 returned 503 "high demand" errors under this free-tier key as of this
 writing, while this one answered immediately - swap back once that clears
 up or once this is on a paid tier, if desired."""
+GEMINI_QUALITY_MODEL: str = "gemini-3.8-flash"
+"""For one-time, offline generation with no live audience waiting on it (as
+of this writing, just trivia_kids.py's question generation) - unlike
+GEMINI_MODEL above, an occasional 503 here just means re-running the script,
+not a dead moment mid-conversation or mid-party, so it's worth trading
+GEMINI_MODEL's guaranteed availability for this model's better reasoning."""
 GEMINI_MAX_OUTPUT_TOKENS: int = 300
 """Caps response length - also keeps replies short enough to feel like a
 quick remark rather than a monologue through the mouth animation."""
@@ -201,7 +207,9 @@ UNICORN_SYSTEM_PROMPT: str = (
     "colors, or magic (e.g., wrap just \"sparkly\" in "
     "[sparkle:all]...[/sparkle], not the whole sentence). Never invent a "
     "new effect, target, or color name, and don't use a tag at all if "
-    "nothing in your reply is really about your lights."
+    "nothing in your reply is really about your lights. Never use square "
+    "brackets for anything else - no stage directions or emotion markers "
+    "like [laughs] or [whispers]; convey emotion in the words themselves."
 )
 """Tune freely - this is just a starting persona, not a fixed requirement.
 The effect-tag paragraph is load-bearing, though - EFFECT_NAMES/
