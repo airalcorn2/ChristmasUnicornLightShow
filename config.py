@@ -157,13 +157,18 @@ voice.py's extract_effect_tags() only recognizes these exact names;
 anything else Gemini might invent just gets spoken as plain text with no
 effect, rather than erroring."""
 
-EFFECT_TARGETS: tuple[str, ...] = ("all", "Head", "Mane", "Trim", "Hat", "Horn")
+EFFECT_TARGETS: tuple[str, ...] = ("all", "Head", "Mane", "Trim", "Hat", "Horn", "Eye")
 """Which part of the body an effect tag can target, via a ":target" suffix
 on the tag name (e.g., "[sparkle:Horn]...[/sparkle]") - the literal
-BAND_CONFIG group names, plus "all" for the whole body. "Eye" is
-deliberately excluded - the eye's blink always stays independent of any
-effect, see talk.py's build_talk_frame(). "all" is also the fallback for a
-missing or unrecognized target - see voice.py's extract_effect_tags()."""
+BAND_CONFIG group names, plus "all" for the whole body. "all" is also the
+fallback for a missing or unrecognized target - see voice.py's
+extract_effect_tags().
+
+An effect targeting "Eye" only recolors whichever physical shape (open or
+closed) is currently showing - it can't change *when* that switch happens.
+The blink's own timing (BlinkState, see blink.py) is decided entirely
+independently and just passed into talk.py's build_talk_frame(), so the
+eye keeps blinking naturally no matter what effect is active."""
 
 UNICORN_SYSTEM_PROMPT: str = (
     "You are the Christmas Unicorn, an LED, magical, cheerful unicorn "
@@ -185,7 +190,7 @@ UNICORN_SYSTEM_PROMPT: str = (
     "name, e.g., [/sparkle] or [/color], never [/sparkle:Horn] or "
     "[/color:Horn:red]. The effect must be one of sparkle, rainbow, glow, "
     "flash, or color, spelled exactly like that. The target must be one of "
-    "Head, Mane, Trim, Hat, Horn, or all (for your whole body) - pick "
+    "Head, Mane, Trim, Hat, Horn, Eye, or all (for your whole body) - pick "
     "whichever part the moment is actually about, or all if it's not about "
     "one specific part. For color, the color name must be one of red, "
     "orange, gold, green, blue, purple, pink, or white, spelled exactly "

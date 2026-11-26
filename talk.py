@@ -306,15 +306,23 @@ def build_talk_frame(
     can be config.official_band_config() instead - see run_conversation()'s
     ``use_official_colors``. If ``effect`` (a (name, target, color) triple -
     see config.EFFECT_NAMES/config.EFFECT_TARGETS/config.EFFECT_COLOR_PALETTE/
-    voice.py's SpeechResult.effect_at()) is set, each targeted body group's
-    and the mouth's color is run through effect_color() first, using
-    ``now`` as that effect's animation clock - except [rainbow], which
-    instead paints a traveling gradient across each targeted group's own
-    lights (see _rainbow_colors()), since a single shared hue for the
-    whole group reads as a plain color pulse, not "a rainbow". Groups
-    outside the effect's target are left at their plain color. The eye's
-    blink is always left alone, so it keeps blinking independently of any
-    effect.
+    voice.py's SpeechResult.effect_at()) is set, each targeted body part's
+    color is run through effect_color() first, using ``now`` as that
+    effect's animation clock - except [rainbow], which instead paints a
+    traveling gradient across each targeted part's own lights (see
+    _rainbow_colors()), since a single shared hue for the whole part reads
+    as a plain color pulse, not "a rainbow". Parts outside the effect's
+    target are left at their plain color.
+
+    The mouth and eye are each actually one of two different physical
+    pixel shapes - "Open"/"Closed" Mouth or Eye - and an effect colors
+    whichever shape ``mouth_open``/``eye_open`` says is currently showing,
+    same as any other part. What an effect can *never* do is change *when*
+    that switch happens: ``mouth_open``/``eye_open`` (word timing, and
+    BlinkState's independent, randomized blink - see blink.py) are decided
+    entirely outside this function and simply passed in, so the mouth
+    still moves with speech and the eye still blinks naturally regardless
+    of whatever effect is active.
     """
     band_config = band_config if band_config is not None else config.BAND_CONFIG
     frame = np.zeros((layout.total_pixels, 3), dtype=np.uint8)
@@ -327,20 +335,27 @@ def build_talk_frame(
             colors = np.broadcast_to(colors, (len(pixel_indices), 3))
         frame[pixel_indices] = (colors * brightness).astype(np.uint8)
 
+    def paint_effect(group_name: str, target_name: str, base_color: tuple[int, int, int]) -> None:
+        """Paint ``group_name``'s actual pixels with whatever ``effect``
+        produces for ``target_name``'s body part right now - target_name
+        differs from group_name for the mouth/eye, whose physical shape
+        (open/closed) isn't itself a target name - see this function's own
+        docstring.
+        """
+        if _rainbow_targets(effect, target_name):
+            paint(group_name, _rainbow_colors(now, len(layout.groups[group_name])))
+        else:
+            paint(group_name, effect_color(effect, now, base_color, target_name))
+
     for name, (_, _, color) in band_config.items():
         if name == "Eye":
-            paint("Open Eye" if eye_open else "Closed Eye", color)
-        elif _rainbow_targets(effect, name):
-            paint(name, _rainbow_colors(now, len(layout.groups[name])))
+            paint_effect("Open Eye" if eye_open else "Closed Eye", "Eye", color)
         else:
-            paint(name, effect_color(effect, now, color, name))
+            paint_effect(name, name, color)
 
     _, _, mouth_color = band_config["Head"]
     mouth_group = "Open Mouth" if mouth_open else "Closed Mouth"
-    if _rainbow_targets(effect, "Head"):
-        paint(mouth_group, _rainbow_colors(now, len(layout.groups[mouth_group])))
-    else:
-        paint(mouth_group, effect_color(effect, now, mouth_color, "Head"))
+    paint_effect(mouth_group, "Head", mouth_color)
     return frame.tobytes()
 
 
