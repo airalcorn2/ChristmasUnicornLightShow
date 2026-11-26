@@ -95,6 +95,7 @@ class _SinkKeepAlive:
 
     def _loop(self) -> None:
         """Replay the silent clip back-to-back until stopped."""
+        assert self._path is not None  # Guaranteed by __enter__() running first.
         while not self._stop.is_set():
             player = subprocess.Popen(
                 ["paplay", "--latency-msec=20", self._path],
