@@ -126,8 +126,13 @@ class _SinkKeepAlive:
             os.unlink(self._path)
 
 
-def record_until_enter(device: str) -> np.ndarray:
+def record_until_enter(device: str, backend: str = "pulse") -> np.ndarray:
     """Record mono float32 audio from ``device`` until Enter is pressed.
+
+    ``backend`` is "pulse" (default) or "alsa" - see audio.AudioStream.
+    Used as-is for the normal (laptop) flow; also available as --pi
+    --keyboard-trigger's fallback, for debugging the Pi's audio/gamepad
+    paths independently of each other, without needing the gamepad at all.
 
     Returns the concatenated samples (empty if Enter was pressed
     immediately, before any audio arrived).
@@ -143,8 +148,34 @@ def record_until_enter(device: str) -> np.ndarray:
     waiter.start()
 
     blocks: list[np.ndarray] = []
-    with audio.AudioStream(device=device) as stream:
+    with audio.AudioStream(device=device, backend=backend) as stream:
         while not stop.is_set():
+            try:
+                blocks.append(stream.read_block(timeout=0.1))
+            except queue.Empty:
+                continue
+    return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.float32)
+
+
+def record_while_held(device: str) -> np.ndarray:
+    """--pi mode's trigger: record from ``device`` (an ALSA device string -
+    see config.PI_MIC_DEVICE) for as long as gamepad.TALK_BUTTON stays
+    held, starting when it's first pressed and stopping on release - the
+    gamepad equivalent of record_until_enter(), for kids to use without a
+    keyboard.
+    """
+    import gamepad  # Local: gamepad.py imports pygame, only installed on the Pi
+    # (apt's python3-pygame, via the venv's --system-site-packages) - never on a
+    # laptop, where --pi mode (and this function) is never actually used.
+
+    print("Waiting for the talk button to be pressed...")
+    while not gamepad.talk_button_held():
+        time.sleep(0.02)
+    print("Recording... (release the button to stop)")
+
+    blocks: list[np.ndarray] = []
+    with audio.AudioStream(device=device, backend="alsa") as stream:
+        while gamepad.talk_button_held():
             try:
                 blocks.append(stream.read_block(timeout=0.1))
             except queue.Empty:
@@ -274,15 +305,22 @@ def play_speech(
     brightness: float,
     blink: BlinkState,
     band_config: dict[str, config.BandConfig] | None = None,
+    alsa_speaker: str | None = None,
 ) -> None:
     """Play ``speech``'s audio aloud while streaming mouth/eye frames timed
     to its open intervals, until playback finishes.
 
-    paplay doesn't decode MP3 (what ElevenLabs returns) itself, so this
-    decodes to WAV via ffmpeg first - before the timing-critical clock
-    starts, so that one-time decode cost can't affect sync - then plays
-    the WAV with `paplay --latency-msec=20`. See _PLAYBACK_STARTUP_LATENCY
-    for why paplay replaced ffplay.
+    Neither `paplay` nor `aplay` decode MP3 (what ElevenLabs returns)
+    themselves, so this decodes to WAV via ffmpeg first - before the
+    timing-critical clock starts, so that one-time decode cost can't
+    affect sync - then plays the WAV with `paplay --latency-msec=20`, or,
+    if ``alsa_speaker`` is given (an ALSA device string - see
+    config.PI_SPEAKER_DEVICE, for --pi mode), `aplay -D <alsa_speaker>`
+    instead, since the Pi has no PulseAudio/PipeWire compatibility layer.
+    See _PLAYBACK_STARTUP_LATENCY for why paplay replaced ffplay for the
+    non-Pi path; that constant hasn't been separately re-measured for
+    aplay on the Pi yet (same method - a loopback-captured click test -
+    would need repeating there once this is actually tested on hardware).
     """
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as mp3_file:
         mp3_file.write(speech.audio_bytes)
@@ -290,7 +328,12 @@ def play_speech(
     wav_path = mp3_path[: -len(".mp3")] + ".wav"
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3_path, wav_path], check=True)
 
-    player = subprocess.Popen(["paplay", "--latency-msec=20", wav_path])
+    if alsa_speaker is not None:
+        player = subprocess.Popen(
+            ["aplay", "-D", alsa_speaker, wav_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    else:
+        player = subprocess.Popen(["paplay", "--latency-msec=20", wav_path])
     start = time.monotonic() + _PLAYBACK_STARTUP_LATENCY
     frame_interval = 1.0 / config.FPS
     next_send = start
@@ -318,20 +361,42 @@ def play_speech(
 
 
 def run_conversation(
-    device: str,
+    device: str | None,
     controller_ip: str | None,
     brightness: float,
     use_official_colors: bool,
     dry_run: bool,
+    pi: bool = False,
+    pi_keyboard: bool = False,
 ) -> None:
     """Loop: push-to-talk record -> transcribe -> Claude reply -> speak,
     until interrupted.
+
+    If ``pi`` is set (--pi mode, for running directly on the Raspberry Pi
+    next to the controller, no laptop needed - see README's "Talking to
+    the Unicorn" section), the trigger is a held gamepad button (see
+    gamepad.py) instead of pressing Enter, ``device``/audio playback go
+    through ALSA (config.PI_MIC_DEVICE/config.PI_SPEAKER_DEVICE) instead
+    of PulseAudio, and _SinkKeepAlive is skipped - that's a PipeWire/
+    PulseAudio idle-sink workaround with no ALSA-direct equivalent needed.
+
+    ``pi_keyboard`` (only meaningful with ``pi``) swaps the gamepad for
+    Enter, while keeping everything else about --pi mode (ALSA audio, no
+    _SinkKeepAlive) - for debugging the Pi's audio/transcription/Gemini
+    path independently of the gamepad, without needing it at all.
     """
     layout = load_layout()
     ip = controller_ip or layout.controller_ip
     band_config = config.official_band_config() if use_official_colors else config.BAND_CONFIG
     print(f"Target: {ip} (DDP)" if not dry_run else "Dry run: not sending DDP packets")
     print(f"Colors: {'official show colors' if use_official_colors else 'hand-picked (config.BAND_CONFIG)'}")
+
+    if pi and (not pi_keyboard):
+        import gamepad  # Local - see record_while_held()'s own comment on this.
+
+        if not gamepad.setup():
+            raise RuntimeError("--pi mode requires a USB gamepad, but none was detected.")
+        print(f"Gamepad connected - hold button {gamepad.TALK_BUTTON} to talk.")
 
     client = genai.Client()
     chat = client.chats.create(
@@ -346,26 +411,50 @@ def run_conversation(
     if sender is not None:
         sender.send_frame(build_talk_frame(layout, False, True, brightness, band_config))
 
+    def _one_turn() -> None:
+        if pi and (not pi_keyboard):
+            samples = record_while_held(config.PI_MIC_DEVICE)
+        elif pi:
+            input("\nPress Enter, then speak to the unicorn...")
+            samples = record_until_enter(config.PI_MIC_DEVICE, backend="alsa")
+        else:
+            assert device is not None  # Guaranteed by main()'s own validation.
+            input("\nPress Enter, then speak to the unicorn...")
+            samples = record_until_enter(device)
+        if len(samples) == 0:
+            return
+
+        print("Transcribing...")
+        user_text = voice.transcribe(samples_to_wav_bytes(samples, config.SAMPLE_RATE))
+        if not user_text.strip():
+            print("(heard nothing - try again)")
+            return
+        print(f"You said: {user_text}")
+
+        reply = get_reply(chat, user_text)
+        print(f"Unicorn: {reply}")
+
+        speech = voice.synthesize(reply)
+        alsa_speaker = config.PI_SPEAKER_DEVICE if pi else None
+        play_speech(speech, layout, sender, brightness, blink, band_config, alsa_speaker)
+
     try:
-        with _SinkKeepAlive():
+        if pi:
             while True:
-                input("\nPress Enter, then speak to the unicorn...")
-                samples = record_until_enter(device)
-                if len(samples) == 0:
-                    continue
-
-                print("Transcribing...")
-                user_text = voice.transcribe(samples_to_wav_bytes(samples, config.SAMPLE_RATE))
-                if not user_text.strip():
-                    print("(heard nothing - try again)")
-                    continue
-                print(f"You said: {user_text}")
-
-                reply = get_reply(chat, user_text)
-                print(f"Unicorn: {reply}")
-
-                speech = voice.synthesize(reply)
-                play_speech(speech, layout, sender, brightness, blink, band_config)
+                try:
+                    _one_turn()
+                except Exception as e:
+                    # --pi mode is meant to run unattended for kids - one bad
+                    # turn (a transient API error, a bad transcription, etc.)
+                    # shouldn't take down the whole session and require
+                    # someone to physically restart it. The non-pi path below
+                    # doesn't have this: there's a person at the terminal who
+                    # can see and fix a real error, so it's left to crash.
+                    print(f"(turn failed: {e} - try again)")
+        else:
+            with _SinkKeepAlive():
+                while True:
+                    _one_turn()
     except KeyboardInterrupt:
         pass
     finally:
@@ -379,12 +468,18 @@ def run_replay(
     brightness: float,
     use_official_colors: bool,
     dry_run: bool,
+    pi: bool = False,
 ) -> None:
     """Replay a fixture saved by voice.save_fixture() over and over (press
-    Enter to repeat, Ctrl+C to stop) - for tuning the mouth timeline
+    Enter to replay, Ctrl+C to stop) - for tuning the mouth timeline
     (voice.py's _open_intervals_from_alignment()/config.MOUTH_MERGE_GAP)
     against the same real audio repeatedly, without new API calls or
     different text each time.
+
+    ``pi`` plays through ALSA (config.PI_SPEAKER_DEVICE) instead of
+    PulseAudio and skips _SinkKeepAlive, same as run_conversation()'s own
+    ``pi`` - this still uses Enter to replay (not the gamepad), since it's
+    a tuning tool for a person at a terminal, not a kid at the prop.
     """
     layout = load_layout()
     ip = controller_ip or layout.controller_ip
@@ -394,14 +489,22 @@ def run_replay(
     speech = voice.load_fixture(path)
     sender = None if dry_run else DDPSender(ip)
     blink = BlinkState()
+    alsa_speaker = config.PI_SPEAKER_DEVICE if pi else None
     if sender is not None:
         sender.send_frame(build_talk_frame(layout, False, True, brightness, band_config))
 
+    def _one_replay() -> None:
+        input("\nPress Enter to replay (Ctrl+C to stop)...")
+        play_speech(speech, layout, sender, brightness, blink, band_config, alsa_speaker)
+
     try:
-        with _SinkKeepAlive():
+        if pi:
             while True:
-                input("\nPress Enter to replay (Ctrl+C to stop)...")
-                play_speech(speech, layout, sender, brightness, blink, band_config)
+                _one_replay()
+        else:
+            with _SinkKeepAlive():
+                while True:
+                    _one_replay()
     except KeyboardInterrupt:
         pass
     finally:
@@ -443,7 +546,11 @@ def run_mouth_test(
 
 def main() -> None:
     """Parse CLI arguments and run the voice chat loop (or list audio devices)."""
-    load_dotenv()
+    # override=True: this Pi also runs a separate project (cauldron) whose shell
+    # config exports its own ELEVENLABS_API_KEY, which would otherwise silently
+    # shadow this project's .env value (load_dotenv() does not override an
+    # already-set environment variable by default).
+    load_dotenv(override=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--list-devices", action="store_true", help="List audio devices and exit."
@@ -506,6 +613,22 @@ def main() -> None:
         "'Open Mouth'/'Closed Mouth' actually look open/closed before trusting any "
         "timing logic built on top of that assumption.",
     )
+    parser.add_argument(
+        "--pi",
+        action="store_true",
+        help="Run directly on the Raspberry Pi next to the controller, no laptop "
+        "needed: a held USB gamepad button (see gamepad.py) triggers recording "
+        "instead of pressing Enter, and audio capture/playback go through ALSA "
+        "(config.PI_MIC_DEVICE/config.PI_SPEAKER_DEVICE) instead of PulseAudio. "
+        "--device is ignored in this mode.",
+    )
+    parser.add_argument(
+        "--pi-keyboard",
+        action="store_true",
+        help="With --pi, swap the gamepad for pressing Enter, while keeping "
+        "everything else about --pi mode (ALSA audio) - for debugging the "
+        "Pi's audio/transcription/Gemini path independently of the gamepad.",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -535,10 +658,11 @@ def main() -> None:
             brightness=max(0.0, min(1.0, args.brightness)),
             use_official_colors=args.official_colors,
             dry_run=args.dry_run,
+            pi=args.pi,
         )
         return
 
-    if args.device is None:
+    if (not args.pi) and (args.device is None):
         parser.error("--device is required (pass a microphone source - see --list-devices)")
 
     run_conversation(
@@ -547,6 +671,8 @@ def main() -> None:
         brightness=max(0.0, min(1.0, args.brightness)),
         use_official_colors=args.official_colors,
         dry_run=args.dry_run,
+        pi=args.pi,
+        pi_keyboard=args.pi_keyboard,
     )
 
 

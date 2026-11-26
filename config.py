@@ -203,6 +203,20 @@ TALK_BRIGHTNESS: float = 0.5
 """Overall power cap for the mouth/eye while talking (0-1) - independent of
 equalizer.py's --brightness."""
 
+PI_MIC_DEVICE: str = "plughw:3,0"
+"""ALSA capture device for talk.py's --pi mode, on the Raspberry Pi
+("cauldron") - the USB webcam's built-in microphone (there's no onboard
+mic on any Pi model, so this was added specifically for talk.py; confirmed
+via `arecord -l` showing "card 3: CinemaTM [Microsoft® LifeCam
+Cinema(TM)]", then verified to actually capture real, non-silent audio).
+Hardcoded, not auto-detected - a fixed, one-time physical setup, not a
+general-purpose multi-device system. Re-confirm with `arecord -l` if the
+webcam, or anything else plugged in before it, ever changes."""
+PI_SPEAKER_DEVICE: str = "plughw:2,0"
+"""ALSA playback device for talk.py's --pi mode - the Pi's own 3.5mm
+headphone jack ("bcm2835 Headphones"), with a powered speaker plugged into
+it (confirmed audible via `speaker-test`)."""
+
 EFFECT_RAINBOW_PERIOD: float = 2.0
 """Seconds for one full hue cycle during a [rainbow] effect."""
 EFFECT_GLOW_PERIOD: float = 1.2

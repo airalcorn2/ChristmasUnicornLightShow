@@ -4,3 +4,9 @@ zstandard
 requests
 google-genai
 python-dotenv
+
+# talk.py's --pi mode also needs pygame (for gamepad.py), but NOT via pip here -
+# install it system-wide with `sudo apt install python3-pygame` (pulls in SDL2,
+# pre-built - compiling it from source via pip on a Pi is slow and unnecessary)
+# and create this project's venv with `--system-site-packages` so it can see
+# that apt copy. Same convention cauldron uses on this same device.

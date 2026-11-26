@@ -105,17 +105,40 @@ class BandAnalyzer:
 
 
 class AudioStream:
-    """Captures mono float32 audio by running `parec` as a subprocess and
-    reading its raw PCM stdout in a background thread, handing back fixed-size
-    blocks through a queue so the main loop can pull at its own pace.
+    """Captures mono float32 audio by running a CLI capture tool as a
+    subprocess and reading its raw PCM stdout in a background thread,
+    handing back fixed-size blocks through a queue so the main loop can
+    pull at its own pace.
+
+    Two backends, since the Raspberry Pi running talk.py's --pi mode runs
+    PipeWire/WirePlumber without the PulseAudio-compatibility socket that
+    parec/paplay need (see README's Network Setup/Pi bridge notes) - so
+    this project talks to the hardware directly via plain ALSA there
+    instead:
+
+    - "pulse" (default): `parec`, for this project's usual PulseAudio/
+      PipeWire machines.
+    - "alsa": `arecord`, for the Pi - ``device`` is then an ALSA device
+      string like "plughw:3,0", not a PulseAudio source name.
     """
 
-    def __init__(self, device: str | None, sample_rate: int = config.SAMPLE_RATE) -> None:
-        """Prepare (but do not yet start) a capture from ``device``.
+    def __init__(
+        self,
+        device: str | None,
+        sample_rate: int = config.SAMPLE_RATE,
+        backend: str = "pulse",
+    ) -> None:
+        """Prepare (but do not yet start) a capture from ``device`` via
+        ``backend`` ("pulse" or "alsa" - see the class docstring).
 
-        ``device`` is a PulseAudio/PipeWire source name, or ``None`` to use
-        the default sink's monitor (i.e., this machine's own audio output).
+        For "pulse", ``device`` is a PulseAudio/PipeWire source name, or
+        ``None`` to use the default sink's monitor (i.e., this machine's
+        own audio output). For "alsa", ``device`` is required (there's no
+        sensible default to fall back to).
         """
+        if (backend == "alsa") and (device is None):
+            raise ValueError('backend="alsa" requires an explicit ALSA device string')
+        self._backend = backend
         self._device = device or _default_monitor_source()
         self._sample_rate = sample_rate
         self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=8)
@@ -124,7 +147,9 @@ class AudioStream:
         self._stop_requested = False
 
     def _read_loop(self) -> None:
-        """Background-thread loop: read fixed-size blocks from `parec` and queue them."""
+        """Background-thread loop: read fixed-size blocks from the capture
+        subprocess and queue them.
+        """
         assert self._process is not None
         assert self._process.stdout is not None
         block_bytes = config.BLOCK_SIZE * _BYTES_PER_SAMPLE
@@ -140,9 +165,23 @@ class AudioStream:
                 pass
 
     def __enter__(self) -> AudioStream:
-        """Start the `parec` subprocess and its background reader thread."""
-        self._process = subprocess.Popen(
-            [
+        """Start the capture subprocess and its background reader thread."""
+        if self._backend == "alsa":
+            command = [
+                "arecord",
+                "-D",
+                self._device,
+                "-f",
+                "FLOAT_LE",
+                "-r",
+                str(self._sample_rate),
+                "-c",
+                "1",
+                "-t",
+                "raw",
+            ]
+        else:
+            command = [
                 "parec",
                 f"--device={self._device}",
                 "--format=float32le",
@@ -150,10 +189,13 @@ class AudioStream:
                 "--channels=1",
                 "--raw",
                 f"--latency-msec={_LATENCY_MSEC}",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+            ]
+        # stderr is left to inherit the parent's (not redirected to DEVNULL) -
+        # if arecord/parec fails to open the device (e.g., still held by a
+        # not-yet-released previous capture), its own error message should be
+        # visible rather than silently swallowed, leaving only an empty-looking
+        # capture with no clue why.
+        self._process = subprocess.Popen(command, stdout=subprocess.PIPE)
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
         return self
@@ -164,7 +206,7 @@ class AudioStream:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        """Stop the reader thread and terminate the `parec` subprocess."""
+        """Stop the reader thread and terminate the capture subprocess."""
         self._stop_requested = True
         if self._process is not None:
             self._process.terminate()

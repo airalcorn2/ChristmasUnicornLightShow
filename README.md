@@ -17,6 +17,7 @@ Pixel frames are sent straight to the Genius Pixel 16 controller over DDP, bypas
 - [Usage](#usage)
   - [Verifying the Hardware/Wiring](#verifying-the-hardwarewiring)
 - [Talking to the Unicorn](#talking-to-the-unicorn)
+  - [Running Without a Laptop (`--pi`)](#running-without-a-laptop---pi)
 - [Notes](#notes)
 
 ## Bands
@@ -73,6 +74,7 @@ Each module also runs directly for its own bench test, independent of the others
 | `equalizer.py` | Ties audio analysis to DDP output - the actual show | `python3 equalizer.py --dry-run` |
 | `voice.py` | ElevenLabs text-to-speech (with per-character timing) and speech-to-text | - |
 | `talk.py` | Push-to-talk voice chat: speech -> Gemini -> speech, with the mouth timed to the reply's own words | `python3 talk.py --list-devices` |
+| `gamepad.py` | USB gamepad input for `talk.py --pi`'s trigger, so a kid can hold a button instead of pressing Enter | `python3 gamepad.py` |
 | `test_lights.py` | Hardware verification: light up groups/nodes/the whole string on demand | `python3 test_lights.py groups --dry-run` |
 | `preview_layout.py` | Renders the parsed layout as a PNG, independent of the physical hardware | `python3 preview_layout.py` |
 
@@ -232,6 +234,43 @@ python3 talk.py --save-fixture test_fixture.json --text "Some line with a good m
 python3 talk.py --replay test_fixture.json --dry-run    # or without --dry-run, against the real hardware
 ```
 
+### Running Without a Laptop (`--pi`)
+
+`--pi` runs the whole conversation loop directly on the Raspberry Pi wired to the controller (`cauldron`, the same Pi the `ChristmasUnicornLightShow` repo's companion Halloween prop project uses) - no laptop needed at the display at all, so a kid can just walk up and use it.
+
+What's different from the normal (laptop) mode:
+
+- **Trigger:** holding a USB gamepad button (the same physical pad `cauldron` uses) starts recording; releasing it stops - see `gamepad.py`. No keyboard, no Enter key.
+- **Microphone:** a USB webcam's built-in mic (`config.PI_MIC_DEVICE`) - the Pi has no onboard microphone on any model, so this is required extra hardware, not a software gap.
+- **Speaker:** the Pi's own 3.5mm headphone jack (`config.PI_SPEAKER_DEVICE`), with a powered speaker plugged into it.
+- **Audio backend:** ALSA (`arecord`/`aplay`) directly, not PulseAudio/PipeWire - the Pi doesn't have that compatibility layer installed, and `aplay` is also how `cauldron`'s own `audio.py` already plays sound on this exact device.
+
+One-time setup on the Pi itself:
+
+```bash
+sudo apt install python3-pygame   # for gamepad.py - see requirements.txt's own note on this
+git clone git@github.com:airalcorn2/ChristmasUnicornLightShow.git ~/unicorn_equalizer
+cd ~/unicorn_equalizer
+python3 -m venv --system-site-packages .venv   # --system-site-packages: so pygame (apt, above) is visible
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env   # then fill in the same three keys as the laptop setup
+```
+
+Copy the show's two xLights XML files to sit next to (one level up from) wherever you cloned the project, matching how it already works on a laptop:
+
+```bash
+scp xlights_rgbeffects.xml xlights_networks.xml wizard@cauldron.local:~/
+```
+
+Then, on the Pi:
+
+```bash
+.venv/bin/python talk.py --pi --brightness 0.3
+```
+
+`gamepad.TALK_BUTTON` (currently button index 2) was confirmed by listening live for a real press with `python3 gamepad.py` run standalone, not guessed - re-confirm the same way if the physical gamepad ever changes.
+`config.PI_MIC_DEVICE`/`config.PI_SPEAKER_DEVICE` were confirmed the same way (`arecord -l`/`aplay -l` plus an actual recorded-and-played-back test), not assumed from the device names alone - re-confirm with those same commands if the webcam, speaker, or anything plugged in before them ever changes.
+
 ## Notes
 
 - Both `test_lights.py` and `equalizer.py` have been run live against the real controller/hardware (not just `--dry-run`), including the node-to-pixel mapping, individual group isolation, the audio-reactive bands, the eye blink, the mouth gate, and `--official-colors`.
@@ -239,3 +278,4 @@ python3 talk.py --replay test_fixture.json --dry-run    # or without --dry-run, 
 - `talk.py` has been run live end-to-end (mic -> transcription -> Gemini -> ElevenLabs -> real hardware) - the mouth timing specifically is still being tuned against real playback (see `--replay` above), so treat its current feel as a work in progress rather than finished.
 - Light effects (`[sparkle:target]`/`[rainbow:target]`/`[glow:target]`/`[flash:target]`) have been verified against real Gemini replies and real ElevenLabs timing data: Gemini reliably wraps only the relevant phrase in a correctly-matched tag, picks a sensible target (the specific group asked about, or `all` when asked for everything at once), and the resulting cue's time window lines up with when that phrase is actually spoken - but this hasn't been watched on the real hardware yet, so do that before trusting it at the display.
 - The Raspberry Pi bridge (see [Network Setup](#network-setup)) has been verified end-to-end against the real controller: ICMP, the controller's HTTP API, and actual DDP/UDP frames (`equalizer.py` confirmed to light the real hardware) all traverse it correctly.
+- `--pi` mode: each individual piece of hardware has been verified in isolation on the real Pi (the gamepad's talk button detected live via a real press, the webcam mic confirmed capturing real non-silent audio, the headphone-jack speaker confirmed audible via `speaker-test`), but the mode as a whole - `talk.py --pi` actually running the full conversation loop end-to-end on the Pi - hasn't been tested yet. In particular, `_PLAYBACK_STARTUP_LATENCY` was tuned for `paplay` on a laptop and has not been re-measured for `aplay` on the Pi.
