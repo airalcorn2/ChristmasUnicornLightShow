@@ -1,0 +1,6 @@
+numpy
+pillow
+zstandard
+requests
+google-genai
+python-dotenv

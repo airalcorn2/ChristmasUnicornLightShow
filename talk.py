@@ -1,0 +1,490 @@
+"""Push-to-talk voice chat with the Christmas Unicorn: record a question,
+transcribe it, get a short in-character reply from Gemini, synthesize that
+reply with ElevenLabs, and play it back while the mouth/eye animate to the
+speech's own word timing - all live, over DDP, on the real hardware (or
+--dry-run, to test without it).
+
+Requires GEMINI_API_KEY, ELEVENLABS_API_KEY, and ELEVENLABS_VOICE_ID in a
+.env file - see .env.example.
+
+Run directly:
+
+    .venv/bin/python talk.py --list-devices   # Find a microphone source name.
+    .venv/bin/python talk.py --device <name> --dry-run
+    .venv/bin/python talk.py --device <name>
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import os
+import queue
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import wave
+from pathlib import Path
+
+import numpy as np
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from google.genai.chats import Chat
+
+import audio
+import config
+import voice
+from blink import BlinkState
+from ddp import DDPSender
+from layout import UnicornLayout, load_layout
+from voice import SpeechResult
+
+_PLAYBACK_END_PADDING: float = 0.2
+"""Extra seconds to keep sending frames past the last word's end time, so
+the mouth doesn't visibly snap shut right as the audio trails off."""
+
+_PLAYBACK_STARTUP_LATENCY: float = 0.05
+"""Real startup latency for `paplay --latency-msec=20` playing an actual
+decoded WAV, measured directly via paplay's own `-v` latency reporting:
+a consistent ~15-23ms once audio is flowing, with some margin added here
+for process-launch jitter.
+
+This replaced ffplay, which - confirmed via a controlled loopback-capture
+test, not a guess - took ~0.3s before any audio was actually audible, and
+was outright unreliable under repeated invocation (missed entirely in 2 of
+5 timed test runs). A single fixed compensation constant can't fix
+unreliable, variable latency - it can only fix a *consistent* one - which
+is why the original ffplay-based fix didn't resolve "the mouth doesn't
+match the words" (it only fixed the separate, smaller issue of the mouth
+being a fixed amount early). paplay doesn't decode MP3 itself, so the MP3
+ElevenLabs returns is decoded to WAV via ffmpeg first in play_speech() -
+that decode happens before the timing-critical clock starts, so its own
+(larger, but one-time, non-realtime) cost can't affect sync."""
+
+_KEEPALIVE_DURATION: float = 2.0
+"""Length of the looped silent clip _SinkKeepAlive plays to hold the
+output sink "RUNNING" rather than "SUSPENDED" between conversation turns -
+see that class's docstring for why."""
+
+
+class _SinkKeepAlive:
+    """Loops silence in the background for as long as this is open, so the
+    output sink never auto-suspends between conversation turns.
+
+    An idle PulseAudio/PipeWire sink can take anywhere from a few hundred
+    milliseconds to over a second to wake back up once a real stream
+    connects - the same idle-sink behavior this project's README already
+    documents for audio.py's capture side. That wake-up delay is what
+    makes the *cold* case fundamentally unpredictable no matter how well
+    tuned _PLAYBACK_STARTUP_LATENCY is for the *warm* case - this sidesteps
+    the problem by keeping the sink warm for the whole session instead of
+    trying to compensate for a wake-up delay that varies run to run.
+    """
+
+    def __init__(self) -> None:
+        """Create (but do not yet start) the keep-alive loop."""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._path: str | None = None
+
+    def _loop(self) -> None:
+        """Replay the silent clip back-to-back until stopped."""
+        while not self._stop.is_set():
+            player = subprocess.Popen(
+                ["paplay", "--latency-msec=20", self._path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            player.wait()
+
+    def __enter__(self) -> _SinkKeepAlive:
+        """Write a short silent WAV and start looping it in a background thread."""
+        fd, self._path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        silence = np.zeros(int(_KEEPALIVE_DURATION * config.SAMPLE_RATE), dtype=np.int16)
+        with wave.open(self._path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(config.SAMPLE_RATE)
+            wav_file.writeframes(silence.tobytes())
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        """Stop the loop and remove the temp file."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+        if self._path is not None:
+            os.unlink(self._path)
+
+
+def record_until_enter(device: str) -> np.ndarray:
+    """Record mono float32 audio from ``device`` until Enter is pressed.
+
+    Returns the concatenated samples (empty if Enter was pressed
+    immediately, before any audio arrived).
+    """
+    print("Recording... press Enter to stop.")
+    stop = threading.Event()
+
+    def _wait_for_enter() -> None:
+        input()
+        stop.set()
+
+    waiter = threading.Thread(target=_wait_for_enter, daemon=True)
+    waiter.start()
+
+    blocks: list[np.ndarray] = []
+    with audio.AudioStream(device=device) as stream:
+        while not stop.is_set():
+            try:
+                blocks.append(stream.read_block(timeout=0.1))
+            except queue.Empty:
+                continue
+    return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.float32)
+
+
+def samples_to_wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
+    """Encode mono float32 samples (-1.0 to 1.0) as 16-bit PCM WAV bytes,
+    for ElevenLabs' speech-to-text upload.
+    """
+    pcm16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm16.tobytes())
+    return buffer.getvalue()
+
+
+def get_reply(chat: Chat, user_text: str) -> str:
+    """Send ``user_text`` to the running Gemini chat session and return the
+    unicorn's in-character reply. ``chat`` already carries the system
+    instruction/history, so this is just one turn.
+    """
+    return chat.send_message(user_text).text
+
+
+def build_talk_frame(
+    layout: UnicornLayout,
+    mouth_open: bool,
+    eye_open: bool,
+    brightness: float,
+    band_config: dict[str, config.BandConfig] | None = None,
+) -> bytes:
+    """Render one DDP payload for talk mode: every band_config group
+    (Head, Mane, Trim, Hat, Horn) lit solidly at its peak color - the
+    whole unicorn, not just the face - plus the mouth/eye animated live
+    on top (mouth mirrors Head's color, same convention as equalizer.py's
+    build_frame()).
+
+    ``band_config`` defaults to config.BAND_CONFIG (hand-picked colors) but
+    can be config.official_band_config() instead - see run_conversation()'s
+    ``use_official_colors``.
+    """
+    band_config = band_config if band_config is not None else config.BAND_CONFIG
+    frame = np.zeros((layout.total_pixels, 3), dtype=np.uint8)
+
+    def paint(group_name: str, color: tuple[int, int, int]) -> None:
+        nodes = layout.groups[group_name]
+        pixel_indices = [layout.node_to_pixel_index(n) for n in nodes]
+        frame[pixel_indices] = (np.array(color, dtype=np.float64) * brightness).astype(np.uint8)
+
+    for name, (_, _, color) in band_config.items():
+        if name == "Eye":
+            paint("Open Eye" if eye_open else "Closed Eye", color)
+        else:
+            paint(name, color)
+
+    _, _, mouth_color = band_config["Head"]
+    paint("Open Mouth" if mouth_open else "Closed Mouth", mouth_color)
+    return frame.tobytes()
+
+
+def play_speech(
+    speech: SpeechResult,
+    layout: UnicornLayout,
+    sender: DDPSender | None,
+    brightness: float,
+    blink: BlinkState,
+    band_config: dict[str, config.BandConfig] | None = None,
+) -> None:
+    """Play ``speech``'s audio aloud while streaming mouth/eye frames timed
+    to its open intervals, until playback finishes.
+
+    paplay doesn't decode MP3 (what ElevenLabs returns) itself, so this
+    decodes to WAV via ffmpeg first - before the timing-critical clock
+    starts, so that one-time decode cost can't affect sync - then plays
+    the WAV with `paplay --latency-msec=20`. See _PLAYBACK_STARTUP_LATENCY
+    for why paplay replaced ffplay.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as mp3_file:
+        mp3_file.write(speech.audio_bytes)
+        mp3_path = mp3_file.name
+    wav_path = mp3_path[: -len(".mp3")] + ".wav"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3_path, wav_path], check=True)
+
+    player = subprocess.Popen(["paplay", "--latency-msec=20", wav_path])
+    start = time.monotonic() + _PLAYBACK_STARTUP_LATENCY
+    frame_interval = 1.0 / config.FPS
+    next_send = start
+    end_at = start + speech.duration() + _PLAYBACK_END_PADDING
+
+    try:
+        while time.monotonic() < end_at:
+            now = time.monotonic()
+            if now >= next_send:
+                next_send = now + frame_interval
+                mouth_open = speech.mouth_open_at(now - start)
+                eye_open = blink.is_open(now)
+                if sender is not None:
+                    sender.send_frame(
+                        build_talk_frame(layout, mouth_open, eye_open, brightness, band_config)
+                    )
+    finally:
+        player.wait(timeout=5)
+        os.unlink(mp3_path)
+        os.unlink(wav_path)
+
+
+def run_conversation(
+    device: str,
+    controller_ip: str | None,
+    brightness: float,
+    use_official_colors: bool,
+    dry_run: bool,
+) -> None:
+    """Loop: push-to-talk record -> transcribe -> Claude reply -> speak,
+    until interrupted.
+    """
+    layout = load_layout()
+    ip = controller_ip or layout.controller_ip
+    band_config = config.official_band_config() if use_official_colors else config.BAND_CONFIG
+    print(f"Target: {ip} (DDP)" if not dry_run else "Dry run: not sending DDP packets")
+    print(f"Colors: {'official show colors' if use_official_colors else 'hand-picked (config.BAND_CONFIG)'}")
+
+    client = genai.Client()
+    chat = client.chats.create(
+        model=config.GEMINI_MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=config.UNICORN_SYSTEM_PROMPT,
+            max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
+        ),
+    )
+    sender = None if dry_run else DDPSender(ip)
+    blink = BlinkState()
+    if sender is not None:
+        sender.send_frame(build_talk_frame(layout, False, True, brightness, band_config))
+
+    try:
+        with _SinkKeepAlive():
+            while True:
+                input("\nPress Enter, then speak to the unicorn...")
+                samples = record_until_enter(device)
+                if len(samples) == 0:
+                    continue
+
+                print("Transcribing...")
+                user_text = voice.transcribe(samples_to_wav_bytes(samples, config.SAMPLE_RATE))
+                if not user_text.strip():
+                    print("(heard nothing - try again)")
+                    continue
+                print(f"You said: {user_text}")
+
+                reply = get_reply(chat, user_text)
+                print(f"Unicorn: {reply}")
+
+                speech = voice.synthesize(reply)
+                play_speech(speech, layout, sender, brightness, blink, band_config)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if sender is not None:
+            sender.close()
+
+
+def run_replay(
+    path: Path,
+    controller_ip: str | None,
+    brightness: float,
+    use_official_colors: bool,
+    dry_run: bool,
+) -> None:
+    """Replay a fixture saved by voice.save_fixture() over and over (press
+    Enter to repeat, Ctrl+C to stop) - for tuning the mouth timeline
+    (voice.py's _open_intervals_from_alignment()/config.MOUTH_MERGE_GAP)
+    against the same real audio repeatedly, without new API calls or
+    different text each time.
+    """
+    layout = load_layout()
+    ip = controller_ip or layout.controller_ip
+    band_config = config.official_band_config() if use_official_colors else config.BAND_CONFIG
+    print(f"Target: {ip} (DDP)" if not dry_run else "Dry run: not sending DDP packets")
+
+    speech = voice.load_fixture(path)
+    sender = None if dry_run else DDPSender(ip)
+    blink = BlinkState()
+    if sender is not None:
+        sender.send_frame(build_talk_frame(layout, False, True, brightness, band_config))
+
+    try:
+        with _SinkKeepAlive():
+            while True:
+                input("\nPress Enter to replay (Ctrl+C to stop)...")
+                play_speech(speech, layout, sender, brightness, blink, band_config)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if sender is not None:
+            sender.close()
+
+
+def run_mouth_test(
+    controller_ip: str | None, brightness: float, use_official_colors: bool, dry_run: bool
+) -> None:
+    """Toggle just the mouth open/closed every second, indefinitely - no
+    TTS, Gemini, or alignment logic involved at all.
+
+    An isolated hardware check: confirms (or refutes) the basic assumption
+    every mouth-timing algorithm in this file depends on - that "Open
+    Mouth" actually looks open and "Closed Mouth" actually looks closed on
+    the real prop - before spending more effort tuning timing logic built
+    on top of that assumption.
+    """
+    layout = load_layout()
+    ip = controller_ip or layout.controller_ip
+    band_config = config.official_band_config() if use_official_colors else config.BAND_CONFIG
+    print(f"Target: {ip} (DDP)" if not dry_run else "Dry run: not sending DDP packets")
+    sender = None if dry_run else DDPSender(ip)
+    mouth_open = False
+    try:
+        while True:
+            mouth_open = not mouth_open
+            print("mouth: OPEN" if mouth_open else "mouth: CLOSED")
+            if sender is not None:
+                sender.send_frame(build_talk_frame(layout, mouth_open, True, brightness, band_config))
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if sender is not None:
+            sender.close()
+
+
+def main() -> None:
+    """Parse CLI arguments and run the voice chat loop (or list audio devices)."""
+    load_dotenv()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--list-devices", action="store_true", help="List audio devices and exit"
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="PulseAudio/PipeWire microphone source name to record from (use "
+        "--list-devices to find it) - required, since there's no sensible "
+        "default microphone the way there is a default loopback source.",
+    )
+    parser.add_argument(
+        "--controller-ip",
+        default=None,
+        help="Override the controller IP parsed from xlights_networks.xml",
+    )
+    parser.add_argument(
+        "--brightness",
+        type=float,
+        default=config.TALK_BRIGHTNESS,
+        help="0-1 overall power cap for the whole unicorn while talking",
+    )
+    parser.add_argument(
+        "--official-colors",
+        action="store_true",
+        help="Use each group's dominant color from the real show's rendered .fseq "
+        "(see show_colors.py) instead of config.BAND_CONFIG's hand-picked ones - "
+        "same flag as equalizer.py's",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Skip sending DDP packets (audio/Claude/ElevenLabs calls still happen)",
+    )
+    parser.add_argument(
+        "--save-fixture",
+        type=Path,
+        default=None,
+        help="Synthesize --text once via ElevenLabs, cache it at this path, and exit - "
+        "see --replay to test against it repeatedly afterwards",
+    )
+    parser.add_argument(
+        "--text",
+        default=None,
+        help="Text to synthesize - required with --save-fixture",
+    )
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        default=None,
+        help="Replay a fixture saved by --save-fixture over and over (press Enter to "
+        "repeat), instead of the mic/Gemini conversation loop - for tuning the mouth "
+        "timeline against the same real audio without new API calls each time",
+    )
+    parser.add_argument(
+        "--mouth-test",
+        action="store_true",
+        help="Toggle just the mouth open/closed every second, forever - an isolated "
+        "hardware check with no TTS/Gemini/alignment logic involved, to confirm "
+        "'Open Mouth'/'Closed Mouth' actually look open/closed before trusting any "
+        "timing logic built on top of that assumption",
+    )
+    args = parser.parse_args()
+
+    if args.list_devices:
+        audio.list_devices()
+        return
+
+    if args.mouth_test:
+        run_mouth_test(
+            controller_ip=args.controller_ip,
+            brightness=max(0.0, min(1.0, args.brightness)),
+            use_official_colors=args.official_colors,
+            dry_run=args.dry_run,
+        )
+        return
+
+    if args.save_fixture is not None:
+        if args.text is None:
+            parser.error("--save-fixture requires --text")
+        voice.save_fixture(args.text, args.save_fixture)
+        print(f"Wrote {args.save_fixture}")
+        return
+
+    if args.replay is not None:
+        run_replay(
+            path=args.replay,
+            controller_ip=args.controller_ip,
+            brightness=max(0.0, min(1.0, args.brightness)),
+            use_official_colors=args.official_colors,
+            dry_run=args.dry_run,
+        )
+        return
+
+    if args.device is None:
+        parser.error("--device is required (pass a microphone source - see --list-devices)")
+
+    run_conversation(
+        device=args.device,
+        controller_ip=args.controller_ip,
+        brightness=max(0.0, min(1.0, args.brightness)),
+        use_official_colors=args.official_colors,
+        dry_run=args.dry_run,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())
