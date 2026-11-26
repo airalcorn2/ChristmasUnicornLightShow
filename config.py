@@ -149,7 +149,7 @@ GEMINI_MAX_OUTPUT_TOKENS: int = 300
 """Caps response length - also keeps replies short enough to feel like a
 quick remark rather than a monologue through the mouth animation."""
 
-EFFECT_NAMES: tuple[str, ...] = ("sparkle", "rainbow", "glow", "flash")
+EFFECT_NAMES: tuple[str, ...] = ("sparkle", "rainbow", "glow", "flash", "color")
 """The only light-effect names Gemini is allowed to invoke (see
 UNICORN_SYSTEM_PROMPT and talk.py's effect_color()) - a closed vocabulary,
 not a free-form one, so every tag it writes is guaranteed renderable.
@@ -175,18 +175,24 @@ UNICORN_SYSTEM_PROMPT: str = (
     "of your reply, by wrapping just that part in a matching pair of tags "
     "naming the effect and which part of your body it applies to, separated "
     "by a colon: [sparkle:Horn]...[/sparkle], [rainbow:all]...[/rainbow], "
-    "[glow:Mane]...[/glow], or [flash:Hat]...[/flash]. Put the effect and "
-    "target on the opening tag only - the closing tag is always just the "
-    "bare effect name, e.g., [/sparkle], never [/sparkle:Horn]. The effect "
-    "must be one of sparkle, rainbow, glow, or flash, spelled exactly like that. The "
-    "target must be one of Head, Mane, Trim, Hat, Horn, or all (for your "
-    "whole body) - pick whichever part the moment is actually about, or all "
-    "if it's not about one specific part. Use these sparingly - at most once "
-    "per reply, and only around the specific words that are actually about "
-    "your lights, colors, or magic (e.g., wrap just \"sparkly\" in "
-    "[sparkle:all]...[/sparkle], not the whole sentence). Never invent a new "
-    "effect or target name, and don't use a tag at all if nothing in your "
-    "reply is really about your lights."
+    "[glow:Mane]...[/glow], or [flash:Hat]...[/flash]. A fifth effect, color, "
+    "needs one more piece naming which single color to show, e.g. "
+    "[color:Horn:red]...[/color] turns just your horn solid red for that "
+    "part. Put the effect, target, and (for color only) the color name on "
+    "the opening tag only - the closing tag is always just the bare effect "
+    "name, e.g., [/sparkle] or [/color], never [/sparkle:Horn] or "
+    "[/color:Horn:red]. The effect must be one of sparkle, rainbow, glow, "
+    "flash, or color, spelled exactly like that. The target must be one of "
+    "Head, Mane, Trim, Hat, Horn, or all (for your whole body) - pick "
+    "whichever part the moment is actually about, or all if it's not about "
+    "one specific part. For color, the color name must be one of red, "
+    "orange, gold, green, blue, purple, pink, or white, spelled exactly "
+    "like that. Use these sparingly - at most once per reply, and only "
+    "around the specific words that are actually about your lights, "
+    "colors, or magic (e.g., wrap just \"sparkly\" in "
+    "[sparkle:all]...[/sparkle], not the whole sentence). Never invent a "
+    "new effect, target, or color name, and don't use a tag at all if "
+    "nothing in your reply is really about your lights."
 )
 """Tune freely - this is just a starting persona, not a fixed requirement.
 The effect-tag paragraph is load-bearing, though - EFFECT_NAMES/
@@ -232,6 +238,21 @@ EFFECT_SPARKLE_COLORS: tuple[tuple[int, int, int], ...] = (
 """Bright colors a [sparkle] effect flickers between, one random pick per
 group per frame - deliberately chaotic, unlike [rainbow]/[glow]'s smooth
 cycles."""
+
+EFFECT_COLOR_PALETTE: dict[str, tuple[int, int, int]] = {
+    "red": (255, 0, 0),
+    "orange": (255, 90, 0),
+    "gold": (255, 180, 0),
+    "green": (0, 200, 60),
+    "blue": (0, 110, 255),
+    "purple": (160, 0, 220),
+    "pink": (255, 60, 160),
+    "white": (255, 255, 255),
+}
+"""The fixed, named colors a [color:target:colorname] effect can show - see
+UNICORN_SYSTEM_PROMPT and talk.py's effect_color(). A closed vocabulary,
+same reasoning as EFFECT_NAMES/EFFECT_TARGETS: every color name Gemini
+writes is guaranteed to be one talk.py actually knows how to render."""
 
 MOUTH_CHATTER_PERIOD: float = 0.3
 """Full open+closed cycle length used to subdivide long open spans into a

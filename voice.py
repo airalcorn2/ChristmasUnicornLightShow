@@ -53,10 +53,10 @@ class SpeechResult:
         self,
         audio_bytes: bytes,
         open_intervals: list[tuple[float, float]],
-        effect_cues: list[tuple[str, str, float, float]] | None = None,
+        effect_cues: list[tuple[str, str, str | None, float, float]] | None = None,
     ) -> None:
         """Store the synthesized audio, its mouth-open (start, end) times,
-        and its (name, target, start, end) effect cues (see
+        and its (name, target, color, start, end) effect cues (see
         extract_effect_tags()).
         """
         self.audio_bytes = audio_bytes
@@ -73,14 +73,15 @@ class SpeechResult:
         """
         return any(start <= elapsed < end for start, end in self.open_intervals)
 
-    def effect_at(self, elapsed: float) -> tuple[str, str] | None:
-        """Return the (name, target) of the light effect active ``elapsed``
-        seconds into playback, or None. If cues overlap, the first one (in
-        the order Gemini wrote them) wins - effects aren't designed to blend.
+    def effect_at(self, elapsed: float) -> tuple[str, str, str | None] | None:
+        """Return the (name, target, color) of the light effect active
+        ``elapsed`` seconds into playback, or None. If cues overlap, the
+        first one (in the order Gemini wrote them) wins - effects aren't
+        designed to blend.
         """
-        for name, target, start, end in self.effect_cues:
+        for name, target, color, start, end in self.effect_cues:
             if start <= elapsed < end:
-                return (name, target)
+                return (name, target, color)
         return None
 
 
@@ -183,26 +184,36 @@ def _apply_chatter(intervals: list[tuple[float, float]]) -> list[tuple[float, fl
 
 
 _EFFECT_TAG_PATTERN = re.compile(
-    r"\[(" + "|".join(config.EFFECT_NAMES) + r")(?::(\w+))?\](.*?)\[/\1(?::\w+)?\]", re.DOTALL
+    r"\[(" + "|".join(config.EFFECT_NAMES) + r")(?::(\w+))?(?::(\w+))?\](.*?)\[/\1(?::\w+)*\]",
+    re.DOTALL,
 )
 """Matches e.g., "[sparkle:Horn]...[/sparkle]" for any name in
 config.EFFECT_NAMES, with an optional ":target" naming which part of the
-body it applies to (see config.EFFECT_TARGETS) - see extract_effect_tags().
+body it applies to (see config.EFFECT_TARGETS), and - for [color] only - a
+second optional ":colorname" (see config.EFFECT_COLOR_PALETTE) - see
+extract_effect_tags().
 
-The closing tag's own optional ":target" (e.g., "[/sparkle:Horn]") is
-matched but ignored - only the opening tag's target is used. Gemini was
-observed echoing the target on the closing tag too, which a stricter
-"[/sparkle]"-only pattern failed to match at all, leaving the whole literal
-tagged text (brackets included) unstripped and spoken aloud by ElevenLabs."""
+The closing tag's own optional, repeatable ":word" suffixes (e.g.,
+"[/sparkle:Horn]" or "[/color:Horn:red]") are matched but ignored - only
+the opening tag's own target/color are used. Gemini was observed echoing
+the target on the closing tag too, which a stricter "[/sparkle]"-only
+pattern failed to match at all, leaving the whole literal tagged text
+(brackets included) unstripped and spoken aloud by ElevenLabs."""
 
 
-def extract_effect_tags(raw_text: str) -> tuple[str, list[tuple[str, str, int, int]]]:
-    """Strip Gemini's inline effect tags (e.g., "[sparkle:Horn]...[/sparkle]")
-    out of ``raw_text``, returning the clean text to actually speak plus each
-    cue's (name, target, start, end) - the effect name, which body part it
+def extract_effect_tags(
+    raw_text: str,
+) -> tuple[str, list[tuple[str, str, str | None, int, int]]]:
+    """Strip Gemini's inline effect tags (e.g., "[sparkle:Horn]...[/sparkle]"
+    or, for [color], "[color:Horn:red]...[/color]") out of ``raw_text``,
+    returning the clean text to actually speak plus each cue's (name,
+    target, color, start, end) - the effect name, which body part it
     targets (config.EFFECT_TARGETS, defaulting to "all" if missing or
-    unrecognized), and *character offsets within that clean text* for start/
-    end, i.e., where the tagged words fall once the tags themselves are gone.
+    unrecognized), which fixed color it names if it's a [color] effect
+    (config.EFFECT_COLOR_PALETTE, or None if missing/unrecognized/not a
+    [color] effect - see talk.py's effect_color()), and *character offsets
+    within that clean text* for start/end, i.e., where the tagged words
+    fall once the tags themselves are gone.
 
     Those offsets get turned into playback *times* in _cues_to_time_ranges(),
     once ElevenLabs has timestamped the clean text - the same "character
@@ -210,7 +221,7 @@ def extract_effect_tags(raw_text: str) -> tuple[str, list[tuple[str, str, int, i
     mouth timing, just applied to cue markers instead of M/B/P letters.
     """
     clean_parts: list[str] = []
-    cues: list[tuple[str, str, int, int]] = []
+    cues: list[tuple[str, str, str | None, int, int]] = []
     clean_pos = 0
     last_end = 0
     for match in _EFFECT_TAG_PATTERN.finditer(raw_text):
@@ -220,11 +231,12 @@ def extract_effect_tags(raw_text: str) -> tuple[str, list[tuple[str, str, int, i
 
         effect_name = match.group(1)
         target = match.group(2) if match.group(2) in config.EFFECT_TARGETS else "all"
-        inner_text = match.group(3)
+        color = match.group(3) if match.group(3) in config.EFFECT_COLOR_PALETTE else None
+        inner_text = match.group(4)
         start = clean_pos
         clean_parts.append(inner_text)
         clean_pos += len(inner_text)
-        cues.append((effect_name, target, start, clean_pos))
+        cues.append((effect_name, target, color, start, clean_pos))
 
         last_end = match.end()
     clean_parts.append(raw_text[last_end:])
@@ -232,22 +244,22 @@ def extract_effect_tags(raw_text: str) -> tuple[str, list[tuple[str, str, int, i
 
 
 def _cues_to_time_ranges(
-    cues: list[tuple[str, str, int, int]], alignment: dict
-) -> list[tuple[str, str, float, float]]:
+    cues: list[tuple[str, str, str | None, int, int]], alignment: dict
+) -> list[tuple[str, str, str | None, float, float]]:
     """Convert extract_effect_tags()'s character-offset cues into (name,
-    target, start_seconds, end_seconds), via the same alignment data
+    target, color, start_seconds, end_seconds), via the same alignment data
     _open_intervals_from_alignment() uses for mouth timing.
     """
     starts = alignment["character_start_times_seconds"]
     ends = alignment["character_end_times_seconds"]
     num_characters = len(starts)
 
-    time_ranges: list[tuple[str, str, float, float]] = []
-    for name, target, start_index, end_index in cues:
+    time_ranges: list[tuple[str, str, str | None, float, float]] = []
+    for name, target, color, start_index, end_index in cues:
         if start_index >= num_characters:
             continue  # The cue wrapped only whitespace/nothing real.
         last_index = min(end_index, num_characters) - 1
-        time_ranges.append((name, target, starts[start_index], ends[last_index]))
+        time_ranges.append((name, target, color, starts[start_index], ends[last_index]))
     return time_ranges
 
 
@@ -275,7 +287,7 @@ def _tts_request(text: str) -> dict:
 
 
 def _speech_result_from_payload(
-    payload: dict, cues: list[tuple[str, str, int, int]] | None = None
+    payload: dict, cues: list[tuple[str, str, str | None, int, int]] | None = None
 ) -> SpeechResult:
     """Build a SpeechResult from a raw ElevenLabs with-timestamps payload,
     re-deriving the mouth timeline (and, if ``cues`` is given, the effect

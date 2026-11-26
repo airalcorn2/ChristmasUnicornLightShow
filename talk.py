@@ -216,15 +216,16 @@ def _hue_to_rgb(hue: float) -> tuple[int, int, int]:
 
 
 def effect_color(
-    effect: tuple[str, str] | None,
+    effect: tuple[str, str, str | None] | None,
     now: float,
     base_color: tuple[int, int, int],
     group_name: str,
 ) -> tuple[int, int, int]:
     """Return the color ``group_name`` (a body group, or "Head" for the
     mouth, which mirrors Head's color) should show right now, given the
-    active (name, target) effect (or None, which just passes ``base_color``
-    through unchanged) - see config.EFFECT_NAMES/config.EFFECT_TARGETS.
+    active (name, target, color) effect (or None, which just passes
+    ``base_color`` through unchanged) - see config.EFFECT_NAMES/
+    config.EFFECT_TARGETS/config.EFFECT_COLOR_PALETTE.
 
     If the effect's target isn't "all" and doesn't match ``group_name``,
     this group sits the effect out and keeps ``base_color`` - that's how a
@@ -235,11 +236,15 @@ def effect_color(
     [rainbow] cycles hue smoothly, the same for every targeted group at a
     given instant; [glow] modulates ``base_color``'s own brightness up and
     down, so it reads as "the unicorn's own colors breathing" rather than a
-    new palette; [flash] is just solid white.
+    new palette; [flash] is just solid white; [color] is a single fixed
+    color from config.EFFECT_COLOR_PALETTE, named by the effect's own
+    ``color`` field (falling back to ``base_color`` if that's somehow
+    missing/unrecognized, same fail-safe reasoning as the unrecognized-name
+    case below).
     """
     if effect is None:
         return base_color
-    effect_name, target = effect
+    effect_name, target, color = effect
     if target != "all" and target != group_name:
         return base_color
     if effect_name == "sparkle":
@@ -254,6 +259,8 @@ def effect_color(
         return (int(r * glow_factor), int(g * glow_factor), int(b * glow_factor))
     if effect_name == "flash":
         return (255, 255, 255)
+    if effect_name == "color":
+        return config.EFFECT_COLOR_PALETTE.get(color, base_color) if color is not None else base_color
     return base_color  # An unrecognized name (shouldn't happen - extract_effect_tags() only
     # ever returns names from config.EFFECT_NAMES) - fail safe to the plain color.
 
@@ -264,7 +271,7 @@ def build_talk_frame(
     eye_open: bool,
     brightness: float,
     band_config: dict[str, config.BandConfig] | None = None,
-    effect: tuple[str, str] | None = None,
+    effect: tuple[str, str, str | None] | None = None,
     now: float = 0.0,
 ) -> bytes:
     """Render one DDP payload for talk mode: every band_config group
@@ -275,9 +282,9 @@ def build_talk_frame(
 
     ``band_config`` defaults to config.BAND_CONFIG (hand-picked colors) but
     can be config.official_band_config() instead - see run_conversation()'s
-    ``use_official_colors``. If ``effect`` (a (name, target) pair - see
-    config.EFFECT_NAMES/config.EFFECT_TARGETS/voice.py's
-    SpeechResult.effect_at()) is set, each body group's and the mouth's
+    ``use_official_colors``. If ``effect`` (a (name, target, color) triple -
+    see config.EFFECT_NAMES/config.EFFECT_TARGETS/config.EFFECT_COLOR_PALETTE/
+    voice.py's SpeechResult.effect_at()) is set, each body group's and the mouth's
     color is run through effect_color() first, using ``now`` as that
     effect's animation clock - groups outside the effect's target are left
     at their plain color (see effect_color()). The eye's blink is always
