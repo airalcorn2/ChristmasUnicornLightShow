@@ -250,7 +250,8 @@ def effect_color(
     if effect_name == "glow":
         phase = (now % config.EFFECT_GLOW_PERIOD) / config.EFFECT_GLOW_PERIOD
         glow_factor = 0.4 + 0.6 * (0.5 + 0.5 * math.sin(2 * math.pi * phase))
-        return tuple(int(channel * glow_factor) for channel in base_color)
+        r, g, b = base_color
+        return (int(r * glow_factor), int(g * glow_factor), int(b * glow_factor))
     if effect_name == "flash":
         return (255, 255, 255)
     return base_color  # An unrecognized name (shouldn't happen - extract_effect_tags() only

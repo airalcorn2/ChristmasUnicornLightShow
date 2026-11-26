@@ -31,6 +31,7 @@ def setup() -> bool:
     if pygame.joystick.get_count() == 0:
         return False
     _joystick = pygame.joystick.Joystick(0)
+    assert _joystick is not None  # Just assigned, above.
     _joystick.init()
     return True
 
@@ -55,6 +56,7 @@ if __name__ == "__main__":
     if not setup():
         print("No USB gamepad found.")
     else:
+        assert _joystick is not None  # Guaranteed by setup() returning True, above.
         print(f"Gamepad connected: {_joystick.get_name()!r}.")
         print(f"Watching button {TALK_BUTTON} - press/release it (Ctrl+C to stop)...")
         previous = False

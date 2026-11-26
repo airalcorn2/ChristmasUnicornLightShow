@@ -141,12 +141,14 @@ def _open_intervals_from_alignment(alignment: dict) -> list[tuple[float, float]]
             open_end = end
         else:
             if open_start is not None:
+                assert open_end is not None  # Always set alongside open_start, above.
                 intervals.append((open_start, open_end))
                 open_start = open_end = None
                 closed_has_mbp = False
             if character.lower() in _CLOSED_LETTERS:
                 closed_has_mbp = True
     if open_start is not None:
+        assert open_end is not None  # Always set alongside open_start, above.
         intervals.append((open_start, open_end))
     return _apply_chatter(intervals)
 
