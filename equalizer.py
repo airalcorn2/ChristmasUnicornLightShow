@@ -77,16 +77,27 @@ def run(
     brightness: float,
     use_official_colors: bool,
     dry_run: bool,
+    pi: bool = False,
 ) -> None:
     """Capture audio and drive the lights (or print levels) until interrupted.
 
     ``device`` is a PulseAudio/PipeWire source name, or ``None`` for the
-    default loopback source. ``controller_ip`` overrides the IP parsed from
-    xlights_networks.xml. ``brightness`` (0-1) is an overall power cap applied
-    on top of each band's own level. ``use_official_colors`` swaps in
+    default loopback source - unless ``pi`` is set (see below), in which
+    case ``device`` is ignored and config.PI_MIC_DEVICE is used instead.
+    ``controller_ip`` overrides the IP parsed from xlights_networks.xml.
+    ``brightness`` (0-1) is an overall power cap applied on top of each
+    band's own level. ``use_official_colors`` swaps in
     ``config.official_band_config()`` (the real show's own colors) instead of
     ``config.BAND_CONFIG``'s hand-picked ones. In ``dry_run``, no DDP packets
     are sent - band levels are printed instead.
+
+    ``pi``: capture from the Raspberry Pi's own USB mic via ALSA directly
+    (config.PI_MIC_DEVICE), instead of PulseAudio/PipeWire's loopback
+    monitor - the Pi has no PulseAudio-compat socket (same reasoning as
+    talk.py's --pi mode). Unlike talk.py, there's no gamepad/speaker
+    involved here - this just swaps which microphone the equalizer reacts
+    to, from "whatever this machine is playing" to "whatever's happening
+    in the room, picked up by the Pi's own mic".
     """
     layout = load_layout()
     ip = controller_ip or layout.controller_ip
@@ -113,8 +124,10 @@ def run(
             build_frame(layout, initial_levels, True, False, band_config, brightness)
         )
 
+    capture_device = config.PI_MIC_DEVICE if pi else device
+    backend = "alsa" if pi else "pulse"
     try:
-        with audio.AudioStream(device=device) as stream:
+        with audio.AudioStream(device=capture_device, backend=backend) as stream:
             next_send = time.monotonic()
             while True:
                 try:
@@ -176,7 +189,16 @@ def main() -> None:
         default=None,
         help="PulseAudio/PipeWire source name to record from (use --list-devices to "
         "find it). Defaults to the default sink's monitor, i.e., this machine's "
-        "audio output.",
+        "audio output. Ignored with --pi, which always uses config.PI_MIC_DEVICE.",
+    )
+    parser.add_argument(
+        "--pi",
+        action="store_true",
+        help="Capture from the Raspberry Pi's own USB mic (config.PI_MIC_DEVICE) via "
+        "ALSA directly, instead of PulseAudio/PipeWire's loopback monitor - the Pi has "
+        "no PulseAudio-compat socket. Reacts to whatever's happening in the room, "
+        "picked up by the mic, rather than this machine's own audio output. --device "
+        "is ignored in this mode.",
     )
     parser.add_argument(
         "--controller-ip",
@@ -206,12 +228,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.list_devices:
-        audio.list_devices()
+        audio.list_devices(pi=args.pi)
         return
 
     run(
         device=args.device,
         controller_ip=args.controller_ip,
+        pi=args.pi,
         fps=args.fps,
         brightness=max(0.0, min(1.0, args.brightness)),
         use_official_colors=args.official_colors,

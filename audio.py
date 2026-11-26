@@ -23,8 +23,18 @@ lights visibly trailing the music. Requesting a short buffer explicitly
 drops that to ~25ms, confirmed with a single-impulse click test."""
 
 
-def list_devices() -> None:
-    """Print available PulseAudio/PipeWire sources and the default loopback source."""
+def list_devices(pi: bool = False) -> None:
+    """Print available audio sources.
+
+    ``pi`` lists ALSA capture devices instead (``arecord -l``) - see
+    AudioStream's own "alsa" backend, used for --pi mode on the Raspberry
+    Pi, which has no PulseAudio/PipeWire-compat socket for `pactl`/`parec`
+    to talk to.
+    """
+    if pi:
+        print("ALSA capture devices (pass a 'plughw:X,Y' string to --device):\n", flush=True)
+        subprocess.run(["arecord", "-l"], check=True)
+        return
     print("PulseAudio/PipeWire sources (pass a Name to --device):\n", flush=True)
     subprocess.run(["pactl", "list", "sources", "short"], check=True)
     default_sink = subprocess.run(

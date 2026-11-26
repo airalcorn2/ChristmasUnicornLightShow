@@ -160,6 +160,7 @@ python3 equalizer.py                     # the real thing: sends DDP to the cont
 Useful flags:
 
 - `--device <source name>` - capture from a specific source instead of the default output monitor (e.g., a mic input).
+- `--pi` - run directly on the Raspberry Pi next to the controller, capturing from its own USB mic (`config.PI_MIC_DEVICE`) via ALSA directly instead of PulseAudio/PipeWire's loopback monitor (the Pi has no PulseAudio-compat socket - see [Running Without a Laptop](#running-without-a-laptop---pi)). Reacts to whatever's happening in the room, picked up by the mic, rather than this machine's own audio output. `--device` is ignored in this mode; `python3 equalizer.py --list-devices --pi` lists ALSA devices (`arecord -l`) instead of PulseAudio sources.
 - `--controller-ip <ip>` - override the IP parsed from `xlights_networks.xml`.
 - `--fps <n>` - pixel update rate (default from `config.FPS`).
 - `--brightness <0-1>` - overall power cap on top of each band's own level (defaults to a dim 0.3, matching `test_lights.py`'s safety default).
