@@ -203,7 +203,10 @@ def get_reply(chat: Chat, user_text: str) -> str:
     unicorn's in-character reply. ``chat`` already carries the system
     instruction/history, so this is just one turn.
     """
-    return chat.send_message(user_text).text
+    text = chat.send_message(user_text).text
+    if text is None:
+        raise RuntimeError("Gemini returned no reply text (response may have been blocked).")
+    return text
 
 
 def _hue_to_rgb(hue: float) -> tuple[int, int, int]:
