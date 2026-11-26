@@ -101,7 +101,7 @@ Audio capture uses `parec` (PulseAudio/PipeWire CLI) to read the system's defaul
 ### Network Setup
 
 Do this first if nothing lights up.
-Full build notes (parts list, controller config, model design) are at https://github.com/airalcorn2/ChristmasUnicornLightShow.
+Full build notes (parts list, controller config, model design) are in [BUILD.md](BUILD.md).
 
 **Current setup: a Raspberry Pi bridge.**
 The controller is wired via Ethernet to a Raspberry Pi (`cauldron`), which joins the home Wi-Fi itself - so this machine reaches the controller over Wi-Fi, with no direct cable to it at all.
